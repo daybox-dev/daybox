@@ -187,6 +187,9 @@ next, on this laptop (never CI):
   2. upload to R2, both paths:
        /dl/$VERSION/   and   /dl/latest/
        daybox-*  SHA256SUMS  SHA256SUMS.minisig
+     NB: the worker strips the /dl/ URL prefix — the BUCKET KEYS are
+     $VERSION/<file> and latest/<file>, with no dl/ in front (an upload
+     to dl/... keys is silently never served; it happened once).
   3. upload dist/install.sh to R2 key  site/install.sh
 
 Step 3 is NOT optional. install.sh pins this release ($VERSION) and the hash
