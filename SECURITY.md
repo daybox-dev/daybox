@@ -56,10 +56,14 @@ below is a consequence of those three sentences.
   Register it as a **read-only deploy key**, or a fine-grained PAT for
   pushing; a compromised box leaks a revocable, narrowly-scoped credential,
   not your GitHub account.
-- **Host keys without TOFU.** The control plane `ssh-keyscan`s the fresh box
-  from inside the provider's network and hands your laptop an exact
-  `known_hosts` line — there's no "accept this fingerprint? (y/n)" prompt to
-  rubber-stamp, and providers recycle IPs within hours, so this matters.
+- **Host keys pinned at first scan — no fingerprint prompts.** The control
+  plane `ssh-keyscan`s the fresh box seconds after boot and hands your
+  laptop an exact `known_hosts` line — there's no "accept this fingerprint?
+  (y/n)" prompt to rubber-stamp, and providers recycle IPs within hours, so
+  this matters. Honestly named, this is trust-on-first-scan, not the absence
+  of TOFU: an attacker in the network path during that first scan window
+  could pin their own key. The window is seconds long, from the control
+  plane's connection, against a box only it knows exists — but it exists.
 - **A hard cost cap (shipping for v1).** Independent of the idle reaper, a
   configurable max-lifetime / spend ceiling force-reaps a box regardless of
   activity, so a runaway process can't quietly bill all weekend. (The idle
@@ -100,16 +104,29 @@ closed and the box is yours.
 The GitHub repo is the trust root — whoever can push to it can run code on
 every machine that pulls it. Two consequences we take seriously:
 
-- **The control plane pulls via a read-only deploy key.** A compromise of
-  the always-on control-plane box cannot push tooling changes back upstream.
-  The push credential lives only on the trusted laptop and is the crown
-  jewel; protect the GitHub account accordingly.
+- **The control plane holds no push credential.** Its tree is *pushed to it*
+  by `daybox init` over ssh from your device; there is no GitHub write
+  credential on the always-on box, so compromising it cannot push tooling
+  changes back upstream. The push credential lives only on the trusted
+  laptop and is a crown jewel; protect the GitHub account accordingly.
 - **No automated release pipeline, ever.** Release binaries are
   cross-compiled and checksummed **locally on the trusted laptop** and
   uploaded deliberately — never built by CI. A CI pipeline with publish
   rights is exactly the Shai-Hulud attack surface we're defending against;
-  we refuse to add one. The installer verifies a checksum served from our
-  own domain, so integrity never depends on the artifact host.
+  we refuse to add one.
+- **The bootstrap trust root, honestly.** For `curl daybox.dev/install.sh |
+  sh`, the trust root is the domain, its TLS, and the credential that can
+  write to the artifact store — the served installer and the artifacts it
+  pins live in the *same* store, so whoever holds that write credential can
+  rewrite both coherently, signing key or no signing key. That is inherent
+  to every curl|bash bootstrap; we don't pretend otherwise. What the pinned
+  hash and signature *do* buy: the store cannot serve a different payload
+  than the installer you can read attests (swap, truncation, rollback at
+  `/dl/latest/`), and `daybox init` refuses signed sums that don't attest
+  the version they're served under (rollback at a version path). The store
+  write credential is therefore a crown jewel on par with the signing key,
+  and is treated as such. Skeptics can bypass the store entirely: read
+  install.sh first (it's short), or clone the repo and build.
 
 ## What a compromise still gets an attacker
 
