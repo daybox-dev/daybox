@@ -119,8 +119,14 @@ provider_summon() { # NAME TYPE IMAGE LOCATION VOLUME_ID ; user_data on stdin
         '{name:$name, server_type:$type, image:$image, location:$loc,
           ssh_keys:$keys, volumes:[$vid], automount:false,
           user_data:$ud, labels:{role:"daybox"}}')")
-    id=$(printf '%s' "$resp" | jq -r '.server.id')
-    ip=$(printf '%s' "$resp" | jq -r '.server.public_net.ipv4.ip')
+    # api's die above runs inside $(...) and exits only that subshell (bash
+    # does not carry errexit into command substitutions): on an API error
+    # $resp is empty and execution CONTINUES here. Without this check the
+    # summon would announce "server  created, ip " and poll a server that
+    # was never created (seen 2026-07-23: dedicated-core quota exceeded).
+    id=$(printf '%s' "$resp" | jq -r '.server.id // empty')
+    ip=$(printf '%s' "$resp" | jq -r '.server.public_net.ipv4.ip // empty')
+    [ -n "$id" ] && [ -n "$ip" ] || die "server create failed (API error above) — nothing was created"
     log "server $id created, ip $ip — waiting for it to run"
 
     local i status

@@ -190,7 +190,8 @@ future devices ───────────┘    (coordination only; traff
 ephemeral pre-auth key, pushes the agent + key + unit over the allowlisted
 ssh path, and waits until headscale reports the node online. The box appears
 as `daybox` / `100.64.0.x`; after a reap, headscale garbage-collects the node,
-so `daybox net` never shows ghosts. **A failed join is fatal** — the summon
+so the net table in `daybox status` never shows ghosts. **A failed join is
+fatal** — the summon
 tears the box down rather than leave a box that isn't on the net.
 
 **Enrolling a device:**
@@ -242,7 +243,7 @@ daybox profile rm <name> [--purge] # reap box; keep the volume unless --purge
 daybox up   -p <name> [type]       # -p is a flag; the positional stays the server type
 daybox ssh  -p <name>
 daybox down -p <name>
-daybox status                      # lists ALL live profiles
+daybox status                      # everything: ALL profiles' boxes + the net table
 ```
 
 `SERVER_NAME`/`VOLUME_NAME` are **derived** from the profile name

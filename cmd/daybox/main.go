@@ -30,9 +30,8 @@ everyday:
   up [-p prof] [type]  summon the big box (or reconnect) and ssh in (fresh shell)
   ssh [-p prof] [cmd]  FRESH shell on the running box (tmux only if you start it)
   attach [-p prof]     the persistent tmux session (the only verb that starts tmux)
-  status [-p prof]     box, price, idle countdown
+  status [-p prof]     everything: each profile's box + net members (-p: one profile)
   down [-p prof]       delete the box now (billing stops)
-  net                  members of your net: devices + live boxes (all profiles)
   profile ...          add|ls|use|rename|rm your daybox profiles
 
 setup:
@@ -73,7 +72,7 @@ func main() {
 		cmdDelegateP("status", args)
 	case "down":
 		cmdDelegateP("down", args)
-	case "net":
+	case "net": // deprecated spelling — folded into status; kept for muscle memory
 		cmdDelegate("net")
 	case "profile":
 		cmdProfile(args)

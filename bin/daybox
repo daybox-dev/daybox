@@ -13,14 +13,14 @@
 #   daybox setup            one-time bootstrap of the current profile's volume
 #   daybox up [type]        create the big box (default type from config), print
 #                           "IP <ip>" and "HOSTKEY <known_hosts line>" on stdout
-#   daybox status           show current big box, uptime and price
+#   daybox status           the whole deployment: every profile's box (uptime,
+#                           price, counters) + the net table (-p: one profile)
 #   daybox ssh [cmd]        fresh shell on the big box (or run cmd) — tmux is
 #                           a user choice, not imposed (see: attach)
 #   daybox attach           attach the persistent tmux session (the only verb
 #                           that starts tmux) — handy from Termius
 #   daybox down             detach volume + DELETE the server (stops billing)
 #   daybox reap             called by systemd timer: down after sustained idle
-#   daybox net              show the daybox net: enrolled devices + live boxes
 #   daybox profile ...      add|ls|use|rename|rm|seed profiles (README: Profiles)
 #   daybox profile seed     show|init|path the profile.toml that declares
 #                           what this profile's boxes CARRY (README: Profile seeds)
@@ -76,6 +76,9 @@ while [ $# -gt 0 ]; do
     esac
 done
 set -- ${_ARGV[@]+"${_ARGV[@]}"}
+# status distinguishes "scoped to one profile" (-p given) from the bare verb
+# (shows every profile) — the default-profile fallback below erases that.
+PROFILE_EXPLICIT=${PROFILE:+1}
 [ -n "$PROFILE" ] || PROFILE=$(cat "$STATE_DIR/current_profile" 2>/dev/null || echo default)
 
 # tool defaults — deployment-wide; a profile's config can override per box
@@ -646,9 +649,11 @@ cmd_up() {
     price=$(provider_price_hourly "$type" "$LOCATION" || true)
     log "creating $type in $LOCATION (~€${price:-?}/h gross) ..."
     local box id
-    box=$(printf '%s' "$ud" | provider_summon "$SERVER_NAME" "$type" "$IMAGE" "$LOCATION" "$vid")
-    id=$(printf '%s' "$box" | jq -r '.id')
-    ip=$(printf '%s' "$box" | jq -r '.ip')
+    box=$(printf '%s' "$ud" | provider_summon "$SERVER_NAME" "$type" "$IMAGE" "$LOCATION" "$vid") \
+        || die "summon failed — no box was created (provider error above)"
+    id=$(printf '%s' "$box" | jq -r '.id // empty')
+    ip=$(printf '%s' "$box" | jq -r '.ip // empty')
+    [ -n "$id" ] && [ -n "$ip" ] || die "provider returned no usable box: ${box:-<empty>}"
     log "server $id running at $ip — waiting for provisioning"
 
     wait_ready "$ip"
@@ -667,29 +672,25 @@ cmd_up() {
 }
 
 # --------------------------------------------------------------- status ----
-cmd_status() {
-    need_config
-    provider_check_credentials
+# status_one: one profile's block of the consolidated status — box, price and
+# counters for the CURRENT profile (derive_profile + creds are the caller's job)
+status_one() {
     local s
     s=$(provider_probe "$SERVER_NAME")
+    echo "profile '$PROFILE':"
     if [ "$s" = "null" ]; then
-        echo "no big box running (volume + snapshot state persist; billing: volume only)"
+        echo "  no box running (volume + snapshot state persist; billing: volume only)"
         return 0
     fi
     local type price
     type=$(printf '%s' "$s" | jq -r '.type')
     price=$(provider_price_hourly "$type" "$LOCATION" || true)
     printf '%s' "$s" | jq -r --arg p "${price:-?}" \
-        '"big box: \(.name)  id=\(.id)  \(.type)  \(.status)
-ip: \(.ip)
-created: \(.created)   (~€" + $p + "/h gross)"'
-    if net_enabled; then
-        echo "net: enabled — 'daybox net' lists members"
-    else
-        echo "net: DOWN here (headscale/agent missing) — 'daybox up' will refuse"
-    fi
-    echo "ingress: locked down (public ssh closed; net + control plane only)"
-    echo "idle ticks: $(cat "$PROFILE_STATE/idle_ticks" 2>/dev/null || echo 0)/$(( REAP_AFTER_IDLE_MIN / 5 )) (reaper checks every 5min)"
+        '"  big box: \(.name)  id=\(.id)  \(.type)  \(.status)
+  ip: \(.ip)
+  created: \(.created)   (~€" + $p + "/h gross)"'
+    echo "  ingress: locked down (public ssh closed; net + control plane only)"
+    echo "  idle ticks: $(cat "$PROFILE_STATE/idle_ticks" 2>/dev/null || echo 0)/$(( REAP_AFTER_IDLE_MIN / 5 )) (reaper checks every 5min)"
 
     # Age, spend so far, and the hard cap. A cap you cannot see is a cap that
     # ambushes you, so it is always printed — including when it is disabled.
@@ -698,15 +699,46 @@ created: \(.created)   (~€" + $p + "/h gross)"'
         local spent="?"
         [ -n "${price:-}" ] && [ "$price" != "?" ] && \
             spent=$(awk -v p="$price" -v m="$age_min" 'BEGIN{printf "%.2f", p*m/60}')
-        echo "age: ${age_min}min   spent so far: ~€${spent}"
+        echo "  age: ${age_min}min   spent so far: ~€${spent}"
         if [ "${MAX_LIFETIME_HOURS:-0}" -gt 0 ] 2>/dev/null; then
             local cap_min=$(( MAX_LIFETIME_HOURS * 60 ))
             local left=$(( cap_min - age_min ))
             [ "$left" -lt 0 ] && left=0
-            echo "lifetime cap: ${MAX_LIFETIME_HOURS}h — ${left}min left, then force-reaped even if busy"
+            echo "  lifetime cap: ${MAX_LIFETIME_HOURS}h — ${left}min left, then force-reaped even if busy"
         else
-            echo "lifetime cap: DISABLED (MAX_LIFETIME_HOURS=0) — only the idle reaper stops the meter"
+            echo "  lifetime cap: DISABLED (MAX_LIFETIME_HOURS=0) — only the idle reaper stops the meter"
         fi
+    fi
+}
+
+# cmd_status: the whole deployment in one command — every profile's box plus
+# the net table ('daybox net' folded in here; the README always promised
+# "lists ALL live profiles"). -p scopes to a single profile's block.
+cmd_status() {
+    if [ -n "$PROFILE_EXPLICIT" ]; then
+        need_config
+        provider_check_credentials
+        status_one
+        return 0
+    fi
+    local p found=
+    for p in $(list_profiles); do
+        found=1
+        # subshell per profile, exactly as cmd_reap: a broken profile config
+        # or missing credentials must not hide the other profiles' status
+        ( derive_profile "$p"
+          provider_has_credentials \
+              || { echo "profile '$p': no credentials for provider '$PROVIDER'"; exit 0; }
+          status_one ) \
+            || log "[$p] status check failed — continuing with other profiles"
+    done
+    [ -n "$found" ] || echo "no profiles set up yet — run: daybox init"
+    echo
+    if net_enabled; then
+        echo "net members:"
+        net_table
+    else
+        echo "net: DOWN here (headscale/agent missing) — 'daybox up' will refuse"
     fi
 }
 
@@ -922,8 +954,7 @@ cmd_reap() {
 }
 
 # ------------------------------------------------------------------ net ----
-cmd_net() {
-    net_enabled || die "net not set up here (the README): needs headscale + agent at $NET_AGENT_BIN"
+net_table() {
     net_nodes_json | jq -r '
         (["ID","NAME","ADDRESS","USER","STATE","KIND","LASTSEEN"] | @tsv),
         (.[] | [ (.id|tostring),
@@ -934,6 +965,12 @@ cmd_net() {
                  (if ((.pre_auth_key.ephemeral? // .ephemeral // false)) then "ephemeral" else "device" end),
                  ((.last_seen.seconds? | values | todate) // "-") ] | @tsv)' \
       | column -t -s "$(printf '\t')"
+}
+
+cmd_net() { # deprecated spelling — the table is part of 'daybox status' now
+    net_enabled || die "net not set up here (the README): needs headscale + agent at $NET_AGENT_BIN"
+    log "'daybox net' is folded into 'daybox status' — this alias still prints the table"
+    net_table
 }
 
 # --------------------------------------------------------------- render ----
