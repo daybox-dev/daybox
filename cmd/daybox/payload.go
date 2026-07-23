@@ -60,29 +60,32 @@ var (
 // verifyMinisign checks a minisign signature over msg using a pinned public
 // key line. Handles both the prehashed ("ED", BLAKE2b-512 — what modern
 // minisign emits) and legacy ("Ed", raw) algorithms, and also verifies the
-// global signature so the trusted comment cannot be swapped.
-func verifyMinisign(pubLine string, msg, sigFile []byte) error {
+// global signature so the trusted comment cannot be swapped. On success it
+// returns the trusted comment — the ONE signed field that can carry claims
+// beyond the file bytes (release.sh puts `version:<v>` there), which is what
+// lets callers bind a signed SHA256SUMS to the release it was cut for.
+func verifyMinisign(pubLine string, msg, sigFile []byte) (string, error) {
 	if strings.TrimSpace(pubLine) == "" {
-		return fmt.Errorf("no release signing key pinned in this build — refusing to trust a downloaded payload")
+		return "", fmt.Errorf("no release signing key pinned in this build — refusing to trust a downloaded payload")
 	}
 	pub, err := base64.StdEncoding.DecodeString(strings.TrimSpace(pubLine))
 	if err != nil || len(pub) != 42 {
-		return fmt.Errorf("malformed pinned public key")
+		return "", fmt.Errorf("malformed pinned public key")
 	}
 	pubKeyID, pubKey := pub[2:10], ed25519.PublicKey(pub[10:])
 
 	lines := strings.Split(strings.ReplaceAll(string(sigFile), "\r\n", "\n"), "\n")
 	if len(lines) < 4 {
-		return fmt.Errorf("malformed signature file")
+		return "", fmt.Errorf("malformed signature file")
 	}
 	sigBlob, err := base64.StdEncoding.DecodeString(strings.TrimSpace(lines[1]))
 	if err != nil || len(sigBlob) != 74 {
-		return fmt.Errorf("malformed signature line")
+		return "", fmt.Errorf("malformed signature line")
 	}
 	algo, sigKeyID, sig := sigBlob[:2], sigBlob[2:10], sigBlob[10:]
 
 	if !bytes.Equal(pubKeyID, sigKeyID) {
-		return fmt.Errorf("signature was made by a different key than the one pinned in this build")
+		return "", fmt.Errorf("signature was made by a different key than the one pinned in this build")
 	}
 
 	signed := msg
@@ -92,26 +95,39 @@ func verifyMinisign(pubLine string, msg, sigFile []byte) error {
 		signed = h[:]
 	case "Ed": // legacy: signature covers the content directly
 	default:
-		return fmt.Errorf("unsupported signature algorithm %q", algo)
+		return "", fmt.Errorf("unsupported signature algorithm %q", algo)
 	}
 	if !ed25519.Verify(pubKey, signed, sig) {
-		return fmt.Errorf("SIGNATURE VERIFICATION FAILED")
+		return "", fmt.Errorf("SIGNATURE VERIFICATION FAILED")
 	}
 
 	// Global signature covers sig || trusted_comment; without this the
 	// trusted comment could be rewritten while staying "verified".
 	const tcPrefix = "trusted comment: "
 	if !strings.HasPrefix(lines[2], tcPrefix) {
-		return fmt.Errorf("malformed trusted comment")
+		return "", fmt.Errorf("malformed trusted comment")
 	}
 	globalSig, err := base64.StdEncoding.DecodeString(strings.TrimSpace(lines[3]))
 	if err != nil || len(globalSig) != 64 {
-		return fmt.Errorf("malformed global signature")
+		return "", fmt.Errorf("malformed global signature")
 	}
-	if !ed25519.Verify(pubKey, append(append([]byte{}, sig...), []byte(lines[2][len(tcPrefix):])...), globalSig) {
-		return fmt.Errorf("GLOBAL SIGNATURE VERIFICATION FAILED (trusted comment tampered)")
+	trustedComment := lines[2][len(tcPrefix):]
+	if !ed25519.Verify(pubKey, append(append([]byte{}, sig...), []byte(trustedComment)...), globalSig) {
+		return "", fmt.Errorf("GLOBAL SIGNATURE VERIFICATION FAILED (trusted comment tampered)")
 	}
-	return nil
+	return trustedComment, nil
+}
+
+// attestsVersion reports whether a (already signature-verified) trusted
+// comment carries the token `version:<ver>`. Whitespace-split tokens, exact
+// match — no substring tricks with a crafted version string.
+func attestsVersion(trustedComment, ver string) bool {
+	for _, f := range strings.Fields(trustedComment) {
+		if f == "version:"+ver {
+			return true
+		}
+	}
+	return false
 }
 
 // ------------------------------------------------------------------ fetch ---
@@ -213,8 +229,22 @@ func fetchControlPlanePayload(version string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := verifyMinisign(minisignPubKey, sums, sig); err != nil {
+	tc, err := verifyMinisign(minisignPubKey, sums, sig)
+	if err != nil {
 		return "", err
+	}
+	// Bind the signed sums to the version directory they were fetched from.
+	// Without this, anyone who can write to the artifact store — the exact
+	// adversary the signing scheme exists for — can copy an OLDER release's
+	// validly-signed SHA256SUMS + tarball under /dl/<new>/ and downgrade
+	// every init (rollback). The trusted comment is covered by the global
+	// signature, so the version claim inside it is as strong as the sums
+	// themselves. "latest" is exempt: it is the dev-build path, makes no
+	// version claim, and released binaries never fetch it.
+	if version != "latest" && !attestsVersion(tc, version) {
+		return "", fmt.Errorf("SIGNED VERSION MISMATCH: /dl/%s/SHA256SUMS is validly signed but does not attest version:%s (trusted comment: %q)\n"+
+			"  the artifact store may be serving another release's files under this version — refusing (rollback protection).\n"+
+			"  Note: releases signed before version binding existed cannot be fetched by version pin.", version, version, tc)
 	}
 
 	want, err := checksumFor(sums, controlPlaneAsset)
@@ -264,11 +294,12 @@ func resolvePayload(flagRepo, flagVersion string) (string, func()) {
 			return dir, noop
 		}
 	}
-	// A released binary pins its own version. Defaulting to /dl/latest/
-	// would let anyone who can write to the artifact store serve an older,
-	// validly-signed release (rollback) — the installer solved exactly this
-	// with a pinned hash; init inherits the same property by fetching the
-	// release it was built as. "latest" remains only for dev builds.
+	// A released binary pins its own version, and fetchControlPlanePayload
+	// additionally requires the signed SHA256SUMS to attest that version in
+	// its trusted comment — so an artifact-store writer can neither point a
+	// release at /dl/latest/ NOR park an older, validly-signed release's
+	// files under this version's path (rollback). "latest" remains only for
+	// dev builds and makes no version claim.
 	ver := flagVersion
 	if ver == "" {
 		if strings.HasPrefix(version, "v") {

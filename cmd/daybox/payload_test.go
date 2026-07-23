@@ -37,7 +37,7 @@ func TestVerifyMinisign(t *testing.T) {
 	evilSig := readFixture(t, "SHA256SUMS.evil.minisig")
 
 	t.Run("valid signature from the pinned key", func(t *testing.T) {
-		if err := verifyMinisign(legit, sums, sig); err != nil {
+		if _, err := verifyMinisign(legit, sums, sig); err != nil {
 			t.Fatalf("expected valid, got %v", err)
 		}
 	})
@@ -45,30 +45,30 @@ func TestVerifyMinisign(t *testing.T) {
 	// Each of these MUST fail. A false accept here is a remote-code-execution
 	// bug, so they are asserted individually rather than in a loop.
 	t.Run("no key pinned fails closed", func(t *testing.T) {
-		if err := verifyMinisign("", sums, sig); err == nil {
+		if _, err := verifyMinisign("", sums, sig); err == nil {
 			t.Fatal("unpinned key must not verify")
 		}
 	})
 	t.Run("content tampered after signing", func(t *testing.T) {
 		bad := append(append([]byte{}, sums...), []byte("evil  extra-file\n")...)
-		if err := verifyMinisign(legit, bad, sig); err == nil {
+		if _, err := verifyMinisign(legit, bad, sig); err == nil {
 			t.Fatal("tampered content must not verify")
 		}
 	})
 	t.Run("signature from a different key", func(t *testing.T) {
-		if err := verifyMinisign(legit, sums, evilSig); err == nil {
+		if _, err := verifyMinisign(legit, sums, evilSig); err == nil {
 			t.Fatal("attacker-signed payload must not verify against the pinned key")
 		}
 	})
 	t.Run("attacker pins their own key but sig is legit's", func(t *testing.T) {
-		if err := verifyMinisign(evilKey, sums, sig); err == nil {
+		if _, err := verifyMinisign(evilKey, sums, sig); err == nil {
 			t.Fatal("key/signature mismatch must not verify")
 		}
 	})
 	t.Run("trusted comment tampered", func(t *testing.T) {
 		lines := strings.Split(string(sig), "\n")
 		lines[2] = "trusted comment: totally legit, promise"
-		if err := verifyMinisign(legit, sums, []byte(strings.Join(lines, "\n"))); err == nil {
+		if _, err := verifyMinisign(legit, sums, []byte(strings.Join(lines, "\n"))); err == nil {
 			t.Fatal("rewritten trusted comment must fail the global signature")
 		}
 	})
@@ -79,7 +79,7 @@ func TestVerifyMinisign(t *testing.T) {
 			"two lines":  []byte("untrusted comment: x\nAAAA\n"),
 			"bad base64": []byte("untrusted comment: x\n!!!!\ntrusted comment: y\n!!!!\n"),
 		} {
-			if err := verifyMinisign(legit, sums, bad); err == nil {
+			if _, err := verifyMinisign(legit, sums, bad); err == nil {
 				t.Fatalf("%s: malformed signature must not verify", name)
 			}
 		}
@@ -202,14 +202,32 @@ func TestFetchControlPlanePayload(t *testing.T) {
 	}
 
 	t.Run("checksum mismatch is refused", func(t *testing.T) {
-		// signed fixture lists "deadbeef" for the asset; real hash differs
+		// signed fixture lists "deadbeef" for the asset; real hash differs.
+		// "latest" here, not a version pin: the fixture's trusted comment
+		// predates version binding, and this case is about the checksum stage.
+		srv := serve(signedSums, signedSig, payload)
+		defer srv.Close()
+		withKey(legit, func() {
+			withBases(srv.URL, func() {
+				if _, err := fetchControlPlanePayload("latest"); err == nil ||
+					!strings.Contains(err.Error(), "CHECKSUM MISMATCH") {
+					t.Fatalf("expected checksum mismatch, got %v", err)
+				}
+			})
+		})
+	})
+
+	t.Run("version pin refuses sums that do not attest the version", func(t *testing.T) {
+		// The rollback defense: a validly-signed SHA256SUMS parked under a
+		// version path it does not attest (e.g. an old release's sums copied
+		// to /dl/v1/) must be refused BEFORE any checksum work.
 		srv := serve(signedSums, signedSig, payload)
 		defer srv.Close()
 		withKey(legit, func() {
 			withBases(srv.URL, func() {
 				if _, err := fetchControlPlanePayload("v1"); err == nil ||
-					!strings.Contains(err.Error(), "CHECKSUM MISMATCH") {
-					t.Fatalf("expected checksum mismatch, got %v", err)
+					!strings.Contains(err.Error(), "SIGNED VERSION MISMATCH") {
+					t.Fatalf("expected signed version mismatch, got %v", err)
 				}
 			})
 		})
@@ -264,5 +282,22 @@ func TestChecksumFor(t *testing.T) {
 	}
 	if _, err := checksumFor(sums, "nope"); err == nil {
 		t.Fatal("missing entry must error")
+	}
+}
+
+func TestAttestsVersion(t *testing.T) {
+	tc := "file:SHA256SUMS version:v0.3.0 timestamp:123"
+	for ver, want := range map[string]bool{
+		"v0.3.0":  true,
+		"v0.3":    false,
+		"0.3.0":   false,
+		"v0.3.0x": false,
+	} {
+		if got := attestsVersion(tc, ver); got != want {
+			t.Errorf("attestsVersion(%q, %q) = %v, want %v", tc, ver, got, want)
+		}
+	}
+	if attestsVersion("timestamp:123\tfile:SHA256SUMS\thashed", "v1") {
+		t.Error("comment with no version token must not attest any version")
 	}
 }

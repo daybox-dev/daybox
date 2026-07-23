@@ -180,7 +180,10 @@ cat SHA256SUMS
 echo
 cat <<NEXT
 next, on this laptop (never CI):
-  1. minisign -Sm $DIST/SHA256SUMS
+  1. minisign -Sm $DIST/SHA256SUMS -t "file:SHA256SUMS version:$VERSION"
+     The version: token is REQUIRED — 'daybox init' refuses a signed
+     SHA256SUMS that does not attest the version it was fetched for
+     (rollback protection); a default-comment signature will not install.
   2. upload to R2, both paths:
        /dl/$VERSION/   and   /dl/latest/
        daybox-*  SHA256SUMS  SHA256SUMS.minisig
