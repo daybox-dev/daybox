@@ -1,0 +1,191 @@
+#cloud-config
+# daybox provisioning — rendered by `daybox up` (render_user_data in bin/daybox).
+#
+# This file is SUBSTRATE ONLY: what every daybox has, whatever it is for.
+# What a box CARRIES — packages, repos, tools, what persists on the volume —
+# is declared per profile in profile.toml and applied by apply-seed.py. If you
+# find yourself adding a tool here, it belongs in a profile instead.
+#
+# Placeholders are "at"-delimited tokens; they are NOT written literally in
+# this header because the renderer would expand them here too. The kinds
+# (spelled without their delimiters):
+#   REPO:path        replaced by <repo>/path's contents, indentation preserved,
+#                    so every summoned box inherits the repo's CURRENT files
+#   FILE:/abs/path   same, for a file outside the repo (control-plane local)
+#   SSH_KEYS         every pubkey in <repo>/keys/*.pub as YAML list items
+#   PROFILE_SEED     this profile's profile.toml, from the control plane
+#   VOLUME_ID        workspace volume's numeric id
+#   REMOTE_USER      login user, from config REMOTE_USER
+#   LITTLEBOX_IP     control plane's public IP — the only inbound source the
+#                    box's ingress firewall permits (the README)
+#
+# Preview the fully rendered result with: daybox render
+
+# Ingress is locked down from the FIRST moment of boot, not from the end of
+# provisioning. bootcmd runs early in every boot — before packages, before
+# runcmd, before any failure can strand the box — so there is no window where
+# public sshd faces the internet, and a firstboot that dies at any point
+# leaves a box that only the control plane can reach. ufw (installed by the
+# packages stage) takes over at the top of firstboot; enabling it replaces
+# these raw rules with the equivalent policy.
+bootcmd:
+  - [sh, -c, "iptables -w -P OUTPUT ACCEPT; iptables -w -F INPUT;
+      iptables -w -A INPUT -i lo -j ACCEPT;
+      iptables -w -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT;
+      iptables -w -A INPUT -p udp --dport 68 -j ACCEPT;
+      iptables -w -A INPUT -p tcp -s @LITTLEBOX_IP@ --dport 22 -j ACCEPT;
+      iptables -w -P INPUT DROP"]
+  - [sh, -c, "ip6tables -w -P OUTPUT ACCEPT; ip6tables -w -F INPUT;
+      ip6tables -w -A INPUT -i lo -j ACCEPT;
+      ip6tables -w -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT;
+      ip6tables -w -A INPUT -p ipv6-icmp -j ACCEPT;
+      ip6tables -w -A INPUT -p udp --dport 546 -j ACCEPT;
+      ip6tables -w -P INPUT DROP"]
+
+ssh_pwauth: false
+
+users:
+  - name: @REMOTE_USER@
+    groups: sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      @SSH_KEYS@
+
+package_update: true
+# Substrate only. tmux because `daybox attach` is built on it, ufw because it
+# is the ingress boundary, git because daybox's own machinery assumes it (the
+# volume git key, ~/.ssh/config, gitconfig, /work/repos). The base image
+# already provides curl and python3. Everything else is profile payload.
+packages:
+  - tmux
+  - git
+  - ufw
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/50-keepalive.conf
+    content: |
+      ClientAliveInterval 15
+      ClientAliveCountMax 3
+  - path: /opt/daybox/tmux.conf
+    content: |
+      @REPO:remote/tmux.conf@
+  - path: /opt/daybox/devbox-tmux
+    permissions: '0755'
+    content: |
+      @REPO:remote/devbox-tmux@
+  - path: /opt/daybox/apply-seed.py
+    permissions: '0755'
+    content: |
+      @REPO:remote/apply-seed.py@
+  - path: /opt/daybox/profile.toml
+    content: |
+      @PROFILE_SEED@
+  - path: /opt/daybox/firstboot.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Substrate, then the profile's seed. Runs once via runcmd;
+      # logs: /var/log/cloud-init-output.log
+      #
+      # set -e, and NO `|| true` anywhere: a box that comes up missing part of
+      # what was asked for is worse than one that fails, because it looks fine.
+      # Every failure lands in seed.status, which `daybox up` reads and refuses
+      # to attach on.
+      set -euo pipefail
+
+      STATUS=/var/lib/daybox/seed.status
+      mkdir -p /var/lib/daybox
+      rm -f "$STATUS"
+      fail() {
+          # apply-seed.py writes a precise reason; don't clobber it with a
+          # generic one.
+          if ! grep -q '^FAILED' "$STATUS" 2>/dev/null; then
+              echo "FAILED: firstboot aborted (see /var/log/cloud-init-output.log)" > "$STATUS"
+          fi
+      }
+      trap fail ERR
+
+      # ---- ingress lockdown, FIRST ----
+      # The bootcmd raw netfilter rules have covered ingress since the first
+      # moment of boot; ufw is the canonical policy from here on. This runs
+      # before ANYTHING that can fail (volume wait, seed), so no failure mode
+      # leaves a box without the lockdown: default-deny inbound, the control
+      # plane's IP as the only allowed source (reaper probe + clean volume
+      # unmount). Interactive access is over the daybox net — the agent
+      # proxies net-side :22 to 127.0.0.1:22 over loopback (ufw always
+      # permits lo); direct tsnet falls back to DERP (outbound), so the
+      # tunnel survives this default-deny inbound policy. The seed only ever
+      # needs OUTBOUND (apt, git clone, installers).
+      ufw default deny incoming
+      ufw default allow outgoing
+      ufw allow from @LITTLEBOX_IP@ to any port 22 proto tcp
+      ufw --force enable
+
+      # ---- workspace volume ----
+      DEV=/dev/disk/by-id/scsi-0HC_Volume_@VOLUME_ID@
+      for i in $(seq 1 60); do
+          if [ -e "$DEV" ]; then break; fi
+          sleep 2
+      done
+      if [ ! -e "$DEV" ]; then
+          echo "FAILED: workspace volume $DEV never appeared" > "$STATUS"
+          exit 1
+      fi
+      mkdir -p /work
+      if ! grep -q "$DEV" /etc/fstab; then
+          echo "$DEV /work ext4 discard,nofail,defaults 0 0" >> /etc/fstab
+      fi
+      if ! mountpoint -q /work; then mount /work; fi
+      mkdir -p /work/repos /work/state
+
+      # ---- git identity: generated once, lives on the volume ----
+      # Quoted heredoc, NOT printf: the values are substituted at render
+      # time and may contain quotes (O'Brien) — inside <<'…' they are data.
+      # The renderer guarantees they are single-line.
+      if [ ! -s /work/state/gitconfig ]; then
+          cat > /work/state/gitconfig <<'GITCFG'
+      [user]
+          name = @GIT_NAME@
+          email = @GIT_EMAIL@
+      [init]
+          defaultBranch = main
+      GITCFG
+      fi
+      mkdir -p /work/state/ssh
+      if [ ! -f /work/state/ssh/id_ed25519 ]; then
+          ssh-keygen -t ed25519 -N "" -f /work/state/ssh/id_ed25519 -C "daybox-github"
+      fi
+      chmod 700 /work/state/ssh
+      chmod 600 /work/state/ssh/id_ed25519
+      chown -R @REMOTE_USER@:@REMOTE_USER@ /work
+
+      # ---- the user's environment ----
+      H=/home/@REMOTE_USER@
+      # create ~/.local tree user-owned BEFORE anything writes under it
+      install -d -o @REMOTE_USER@ -g @REMOTE_USER@ "$H/.local" "$H/.local/bin" "$H/.local/share"
+      install -o @REMOTE_USER@ -g @REMOTE_USER@ -m 0644 /opt/daybox/tmux.conf "$H/.tmux.conf"
+      install -o @REMOTE_USER@ -g @REMOTE_USER@ -m 0755 /opt/daybox/devbox-tmux "$H/.local/bin/devbox-tmux"
+      install -d -o @REMOTE_USER@ -g @REMOTE_USER@ "$H/.config"
+
+      ln -sf /work/state/gitconfig "$H/.gitconfig"
+      chown -h @REMOTE_USER@:@REMOTE_USER@ "$H/.gitconfig"
+
+      # volume-resident shell config — user additions to /work/state/shellrc
+      # survive reaps without a template change
+      echo '[ -f /work/state/shellrc ] && . /work/state/shellrc' >> "$H/.bashrc"
+
+      # git-over-ssh uses the volume-resident key on every summoned box
+      install -d -o @REMOTE_USER@ -g @REMOTE_USER@ -m 0700 "$H/.ssh"
+      printf 'Host github.com\n    IdentityFile /work/state/ssh/id_ed25519\n    StrictHostKeyChecking accept-new\n' > "$H/.ssh/config"
+      chown @REMOTE_USER@:@REMOTE_USER@ "$H/.ssh/config"
+      chmod 600 "$H/.ssh/config"
+      systemctl reload ssh
+
+      # ---- the profile's seed: everything this box actually carries ----
+      /opt/daybox/apply-seed.py /opt/daybox/profile.toml @REMOTE_USER@
+
+      echo ok > "$STATUS"
+
+runcmd:
+  - [/opt/daybox/firstboot.sh]

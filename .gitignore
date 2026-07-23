@@ -1,0 +1,10 @@
+# Secrets and machine-local state never live in this repo — they belong in
+# ~/.config/daybox/ (token, ts_authkey, config.local, state/, known_hosts).
+*.bak
+.DS_Store
+dist/
+cmd/daybox/daybox
+keys/*.pub
+/daybox
+__pycache__/
+*.pyc

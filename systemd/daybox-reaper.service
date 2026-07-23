@@ -1,0 +1,11 @@
+[Unit]
+Description=daybox idle reaper (deletes the big devbox after sustained idle)
+
+[Service]
+Type=oneshot
+# oneshot's default start timeout is INFINITY; a single hung provider call
+# or ssh would stop reaping for every profile forever (the timer never
+# refires while the unit is active). Individual probes are bounded in-script;
+# this bounds the whole run.
+TimeoutStartSec=10min
+ExecStart=%h/.local/bin/daybox reap

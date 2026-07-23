@@ -1,0 +1,104 @@
+# Headscale config EXAMPLE for the daybox net — the deployed file lives at
+# /etc/headscale/config.yaml on the control plane (see the README) with the
+# deployment's real values (server_url IP, oidc allowed_users). Keep this
+# example in sync structurally; nothing secret belongs in either copy
+# (keys/db live under /var/lib/headscale).
+
+# Control protocol is Noise-encrypted (ts2021) end-to-end, so plain http is
+# acceptable transport; a TLS domain is a later nicety, not a security fix.
+server_url: http://CONTROL_PLANE_IP:8080
+listen_addr: 0.0.0.0:8080
+metrics_listen_addr: 127.0.0.1:9090
+grpc_listen_addr: 127.0.0.1:50443
+grpc_allow_insecure: false
+trusted_proxies: []
+
+noise:
+  private_key_path: /var/lib/headscale/noise_private.key
+
+prefixes:
+  v4: 100.64.0.0/10
+  v6: fd7a:115c:a1e0::/48
+  allocation: sequential
+
+derp:
+  server:
+    enabled: false
+  # Upstream Tailscale DERP relays as *fallback* only — with the control
+  # plane's static public IP, connections should go direct. Traffic over
+  # DERP stays e2e-encrypted. Self-hosting DERP needs TLS; see the README.
+  urls:
+    - https://controlplane.tailscale.com/derpmap/default
+  paths: []
+  auto_update_enabled: true
+  update_frequency: 3h
+
+disable_check_updates: true
+
+node:
+  # Membership is not eternal (product.md): device keys lapse and get
+  # re-approved. 30d here; per-device-class (phone: days) when the pairing
+  # dashboard lands. Ephemeral devbox nodes never live long enough to care.
+  expiry: 720h
+  ephemeral:
+    # Devboxes register as ephemeral; GC shortly after they stop responding
+    # (the reaper deletes the machine; this deletes the ghost node).
+    inactivity_timeout: 30m
+
+database:
+  type: sqlite
+  sqlite:
+    path: /var/lib/headscale/db.sqlite
+    write_ahead_log: true
+    wal_autocheckpoint: 1000
+
+log:
+  level: info
+  format: text
+
+policy:
+  mode: file
+  path: ""
+
+dns:
+  magic_dns: true
+  # MagicDNS namespace (internal-only, resolved inside tsnet nodes):
+  # <hostname>.daybox.internal
+  base_domain: daybox.internal
+  # Never touch a device's real resolv.conf/OS DNS — all our nodes are
+  # userspace (tsnet), and a future full client shouldn't clobber work DNS.
+  override_local_dns: false
+  nameservers:
+    global: []
+    split: {}
+  search_domains: []
+  extra_records: []
+
+unix_socket: /var/run/headscale/headscale.sock
+# 0770 + adding the operator to the headscale group = CLI without sudo.
+unix_socket_permission: "0770"
+
+# OpenID Connect — the product onboarding flow (`daybox login` → browser →
+# Google/Apple → device approved). Enabling requires creating an OAuth
+# client (user step, see the README), then uncomment and restart:
+# oidc:
+#   only_start_if_oidc_is_available: true
+#   issuer: "https://accounts.google.com"
+#   client_id: "<from Google Cloud console>"
+#   client_secret_path: "/etc/headscale/oidc_client_secret"
+#   email_verified_required: true
+#   allowed_users:
+#     - you@example.com
+#   pkce:
+#     enabled: true
+#     method: S256
+
+logtail:
+  # Never send client logs to Tailscale Inc.
+  enabled: false
+
+taildrop:
+  enabled: false
+
+auto_update:
+  enabled: false

@@ -1,0 +1,13 @@
+[Unit]
+Description=daybox net agent (userspace tsnet node; proxies net :22 to local sshd)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+EnvironmentFile=/etc/default/daybox-agent
+ExecStart=/usr/local/bin/daybox-agent join -control ${DAYBOX_CONTROL} -state /var/lib/daybox-agent -hostname %H -authkey-file /var/lib/daybox-agent/authkey
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

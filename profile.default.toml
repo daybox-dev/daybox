@@ -1,0 +1,69 @@
+# daybox profile seed — what a box for this profile CARRIES.
+#
+# Copied here by `daybox profile add`. Lives on the control plane at
+#   ~/.config/daybox/profiles/<name>/profile.toml
+# and is applied on every boot. Edit it and the next `daybox up` picks it up.
+#
+# daybox itself ships only substrate: the volume mount, your git identity and
+# key, tmux, the ingress lockdown. Everything else on your box is here, in a
+# file you own. If a box has something you did not put in this file, that is a
+# bug — tell us.
+#
+# Nothing here is allowed to fail quietly. If a step fails, the summon fails
+# loudly and `daybox up` refuses to attach, rather than handing you a box that
+# looks right and isn't.
+
+# ---------------------------------------------------------------- packages --
+# Installed with apt on every boot (the root disk is rebuilt each summon).
+# apt is a signed, verified channel — the one install path daybox vouches for.
+packages = [
+  "ripgrep",
+  "jq",
+  "unzip",
+  "htop",
+  "build-essential",
+]
+
+# ------------------------------------------------------------------- repos --
+# Cloned into /work/repos on first boot, skipped if already there. Uses the
+# volume's own git key (see README: the box commits as you, with a scoped key).
+# repos = ["git@github.com:you/yourthing.git"]
+
+# ----------------------------------------------------------------- persist --
+# "path in your home" = "path under /work/state"
+#
+# The volume is the box's memory. Anything mapped here is symlinked onto it and
+# survives every reap; anything else lives on the root disk and is gone at the
+# next summon. This is how a tool's auth and state stay warm across boxes.
+#
+# A trailing slash declares a directory: it is created on the volume up front,
+# so tools can mkdir/write into it on a brand-new workspace. No slash means a
+# file: the link dangles until the tool first writes it.
+#
+# [persist]
+# ".claude/"             = "claude"         # Claude Code auth + sessions
+# ".claude.json"         = "claude.json"
+# ".local/share/claude/" = "claude-share"   # the installed versions
+# ".config/gh/"          = "gh"             # gh auth
+
+# ------------------------------------------------------------------- setup --
+# Arbitrary commands, run as your login user. daybox does NOT vouch for these:
+# they run verbatim, so a line that pipes an installer into a shell is your
+# informed choice, recorded in a file you own.
+#
+# [setup]
+#
+# once: run once PER VOLUME, tracked on the volume. For things that install
+# into /work and therefore survive a reap — installing them again on every
+# boot would be a pointless download and a repeated supply-chain exposure.
+# Edit the command text and it runs again, because the declaration changed.
+# once = ["curl -fsSL https://claude.ai/install.sh | bash"]
+#
+# every_boot: run on EVERY boot. For things that land on the ephemeral root
+# disk and would otherwise be missing after a reap. Watch for tools that
+# split across both disks: Claude Code's versions persist under [persist],
+# but its ~/.local/bin launcher lives on the root disk, so a reap strands
+# the versions with nothing on PATH — re-run the persisted binary's own
+# installer each boot (no download; it links the launcher + shell setup):
+# every_boot = ["sudo npm install -g pnpm@10",
+#               'v=$(ls ~/.local/share/claude/versions | sort -V | tail -1) && "$HOME/.local/share/claude/versions/$v" install']

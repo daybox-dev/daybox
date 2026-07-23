@@ -1,0 +1,257 @@
+#!/bin/bash
+# devbox-tmux — robust tmux session entrypoint for daybox boxes
+# (`daybox attach` runs this).
+#
+# Goals:
+#   * Always land the caller in a clean, attached session named "$SESSION".
+#   * Survive client death: the session/server persists (see ~/.tmux.conf).
+#   * Detect a *wedged* server (one that no longer answers its control
+#     socket) and recover it instead of hanging forever.
+#
+# Usage:
+#   devbox-tmux [-CC]      # attach (with iTerm2 control mode if -CC given)
+#
+# Exit codes:
+#   0  attached / handed off to exec tmux
+#   1  unrecoverable error
+
+set -u
+
+SESSION="${DEVBOX_TMUX_SESSION:-main}"
+CC_FLAG=""
+[ "${1:-}" = "-CC" ] && CC_FLAG="-CC"
+
+# How long we allow a server query to take before declaring it wedged.
+PROBE_TIMEOUT="${DEVBOX_TMUX_PROBE_TIMEOUT:-4}"
+
+log() { printf '[devbox-tmux] %s\n' "$*" >&2; }
+
+# Run a tmux command with a hard timeout. Returns:
+#   0   -> command succeeded
+#   124 -> timed out (server is wedged / not answering)
+#   *   -> tmux returned that exit code (e.g. "no server" / "no session")
+#
+# stdin is /dev/null: a tmux client passes its stdio fds to the server, and
+# a wedged server retains them past the client's death. Handing it our real
+# tty that way is how the server ends up blocked writing to a dead pty
+# later. Probes must never leak the session tty into the server.
+#
+# For the same reason, NEVER capture a probe's output via command
+# substitution: the pipe's write end travels into the server, and if the
+# server is wedged, bash blocks reading the pipe forever even after the
+# timeout kills the client. Capture through a temp file instead.
+probe() {
+    timeout "$PROBE_TIMEOUT" tmux "$@" </dev/null
+}
+
+server_responsive() {
+    # `tmux list-sessions` returns quickly on a healthy server, even if it
+    # has zero sessions (then it exits non-zero but FAST). A wedged server
+    # makes it hang -> timeout 124.
+    probe list-sessions >/dev/null 2>&1
+    local rc=$?
+    [ "$rc" -ne 124 ]
+}
+
+# The tmux *server* runs with comm "tmux: server" (NOT "tmux", which is the
+# client). Match it precisely so we never mistake a client for the server.
+server_running() {
+    # Is there a server process or socket at all?
+    if pgrep -u "$(id -u)" -x 'tmux: server' >/dev/null 2>&1; then
+        return 0
+    fi
+    # Some platforms truncate comm; also accept a live default socket.
+    [ -S "/tmp/tmux-$(id -u)/default" ]
+}
+
+reap_orphan_clients() {
+    # A network drop can kill the ssh session while leaving its
+    # `tmux -CC attach` client process alive and orphaned (reparented to
+    # pid 1, controlling terminal gone). The server still counts the orphan
+    # as an attached control client and keeps writing %output to its pty;
+    # once that pty's buffer fills, the write blocks and the WHOLE server
+    # event loop wedges — panes freeze mid-output and new attaches hang.
+    #
+    # Reap such orphans on EVERY attach, not just when the server already
+    # tests as wedged: between output bursts the server answers probes
+    # fine, so a responsiveness check alone leaves the landmine armed.
+    # Killing a client never touches processes inside the panes.
+    local pid ppid
+    for pid in $(pgrep -u "$(id -u)" -f 'tmux .*-CC attach' 2>/dev/null); do
+        [ "$pid" = "$$" ] && continue
+        ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+        if [ "$ppid" = "1" ]; then
+            log "reaping orphaned control client $pid (parent died)"
+            kill -9 "$pid" 2>/dev/null
+        fi
+    done
+}
+
+reap_zombie_pty_holders() {
+    # A session-transport process (an sshd session child) can inherit pty
+    # master fds from PRIOR sessions. Such a leaked, unread master keeps a
+    # dead client tty alive forever; if the tmux server still holds that
+    # tty's slave fd from the dead client, its next write to it blocks and
+    # wedges the whole event loop — and SIGUSR1 can't fix a full-pty block.
+    #
+    # Kill same-uid processes holding a master for a pty that has NO live
+    # processes on it. A live session always has at least its shell on the
+    # tty, so those are never touched. Our own ancestry (this very session
+    # inherits the same leaked fds) can't be killed from here — log it;
+    # the NEXT connection will reap these holders since they will no
+    # longer be its ancestors.
+    local self_chain=" $$ " p="$PPID"
+    while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
+        self_chain="${self_chain}${p} "
+        p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+    done
+    local servers=" $(pgrep -u "$(id -u)" -x 'tmux: server' 2>/dev/null | tr '\n' ' ') "
+
+    local fdinfo fd pid idx
+    for fdinfo in /proc/[0-9]*/fdinfo/*; do
+        fd=${fdinfo/fdinfo/fd}
+        [ "$(readlink "$fd" 2>/dev/null)" = "/dev/ptmx" ] || continue
+        idx=$(awk '/^tty-index:/ {print $2}' "$fdinfo" 2>/dev/null)
+        [ -n "$idx" ] || continue
+        [ -z "$(ps -t "pts/$idx" -o pid= 2>/dev/null)" ] || continue
+        pid=${fdinfo#/proc/}; pid=${pid%%/*}
+        case "$servers" in *" $pid "*) continue ;; esac
+        case "$self_chain" in
+        *" $pid "*)
+            log "NOTE: this session inherited the leaked master of dead pts/$idx (pid $pid); a reconnect will clear it"
+            continue ;;
+        esac
+        # Only kill the session-transport processes the leak is known to
+        # ride in. Anything else holding a master for a silent pty might
+        # be mid-openpty (child not spawned yet) — never kill those.
+        case "$(tr '\0' ' ' </proc/"$pid"/cmdline 2>/dev/null)" in
+        *sshd*)
+            log "killing $pid (holds leaked master of dead pts/$idx)"
+            kill -9 "$pid" 2>/dev/null ;;
+        *)
+            log "NOTE: pid $pid holds a master for silent pts/$idx; leaving it alone" ;;
+        esac
+    done
+}
+
+recover_wedged_server() {
+    log "tmux server is not responding (wedged). Attempting recovery..."
+
+    # 0. Re-reap first: a client can become an orphan (or a zombie-pty
+    #    holder) in the window since main()'s sweep, and clearing them is
+    #    what actually unblocks a server stuck in a pty write. Give the
+    #    kernel a moment to hang up the freed ptys (EIO wakes the server).
+    reap_orphan_clients
+    reap_zombie_pty_holders
+    sleep 2
+    if server_responsive; then
+        log "server recovered after reaping dead clients (no sessions lost)."
+        return 0
+    fi
+
+    # 1. Non-destructive nudge: SIGUSR1 makes tmux re-create its socket
+    #    and re-scan clients, which can unwedge a stuck event loop WITHOUT
+    #    killing anything in the panes.
+    local spid0
+    spid0=$(pgrep -u "$(id -u)" -x 'tmux: server' | head -1)
+    if [ -n "$spid0" ]; then
+        log "sending SIGCONT+SIGUSR1 to server $spid0 (non-destructive)"
+        kill -CONT "$spid0" 2>/dev/null
+        kill -USR1 "$spid0" 2>/dev/null
+        sleep 1
+        if server_responsive; then
+            log "server recovered via SIGUSR1 (no sessions lost)."
+            return 0
+        fi
+    fi
+
+    # 2. Kill whatever clients the server can still report (capture via
+    #    temp file — see probe() on why command substitution would hang).
+    local tmpf clients
+    tmpf=$(mktemp) || { log "mktemp failed"; return 1; }
+    probe list-clients -F '#{client_pid}' >"$tmpf" 2>/dev/null
+    clients=$(tr '\n' ' ' <"$tmpf")
+    rm -f "$tmpf"
+    if [ -n "${clients// /}" ]; then
+        log "killing stale clients: $clients"
+        # shellcheck disable=SC2086
+        kill -9 $clients 2>/dev/null
+        sleep 1
+    fi
+
+    if server_responsive; then
+        log "server recovered after clearing clients."
+        return 0
+    fi
+
+    # 3. Find lingering client processes the server didn't report.
+    local cpids
+    cpids=$(pgrep -u "$(id -u)" -f 'tmux .*attach' 2>/dev/null)
+    if [ -n "$cpids" ]; then
+        log "force-killing lingering attach clients: $cpids"
+        # shellcheck disable=SC2086
+        kill -9 $cpids 2>/dev/null
+        sleep 1
+    fi
+
+    if server_responsive; then
+        log "server recovered after killing attach clients."
+        return 0
+    fi
+
+    # 4. Still wedged. The server itself must be restarted. WARN: this ends
+    #    any processes running inside existing panes.
+    log "WARNING: server still wedged; restarting it (running panes will be lost)."
+    local spid
+    spid=$(pgrep -u "$(id -u)" -x 'tmux: server' | head -1)
+    if [ -n "$spid" ]; then
+        kill -TERM "$spid" 2>/dev/null
+        sleep 1
+        kill -9 "$spid" 2>/dev/null
+        sleep 1
+    fi
+    # Clean up a stale socket if the process is gone but socket remains.
+    local sock="/tmp/tmux-$(id -u)/default"
+    [ -S "$sock" ] && ! server_running && rm -f "$sock" 2>/dev/null
+
+    server_running && return 1
+    return 0
+}
+
+ensure_session() {
+    # Create the named session if it doesn't already exist.
+    if ! probe has-session -t "$SESSION" 2>/dev/null; then
+        log "creating session '$SESSION'"
+        tmux new-session -d -s "$SESSION" 2>/dev/null
+    fi
+}
+
+main() {
+    # Always reap dead-client debris BEFORE probing: a server with a dead
+    # control client attached (or a leaked pty master pinning a dead tty)
+    # can pass a responsiveness probe while idle, then wedge on the next
+    # output burst.
+    reap_orphan_clients
+    reap_zombie_pty_holders
+
+    if server_running; then
+        if ! server_responsive; then
+            if ! recover_wedged_server; then
+                log "ERROR: could not recover tmux server."
+                exit 1
+            fi
+        fi
+    fi
+
+    ensure_session
+
+    # Hand off: replace this process with the attach so the user's terminal
+    # is wired directly to tmux (important for -CC control mode).
+    if [ -n "$CC_FLAG" ]; then
+        exec tmux -CC attach -t "$SESSION"
+    else
+        exec tmux attach -t "$SESSION"
+    fi
+}
+
+main "$@"
