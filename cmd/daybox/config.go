@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -80,24 +81,48 @@ func (c *config) controlURL() string {
 }
 
 // writeLocalConfig rewrites config.local with the values init gathered.
+// Every OTHER key already present is carried forward verbatim: init owns the
+// deployment's identity (CONTROL_HOST, LITTLEBOX_IP, git identity), not its
+// knobs. Dropping the rest once clobbered NET_USER, so every later enroll
+// fell back to headscale user "dev" and died — and the same clobber applies
+// to PROVIDER, REMOTE_USER, reaper tuning, NET_URL/NET_PORT. Re-running init
+// must heal drift, not reset the deployment to defaults.
 // An existing file is preserved as .bak (it may be a half-filled example).
 func writeLocalConfig(vals [][2]string) error {
 	if err := os.MkdirAll(confDir(), 0o755); err != nil {
 		return err
 	}
+	old := loadConfig()
 	p := configPath()
 	if _, err := os.Stat(p); err == nil {
 		os.Rename(p, p+".bak")
 	}
+	quote := func(v string) string {
+		if strings.ContainsAny(v, " \t") {
+			return `"` + v + `"`
+		}
+		return v
+	}
 	var b strings.Builder
 	b.WriteString("# daybox deployment config — written by 'daybox init'.\n")
 	b.WriteString("# Machine-local, never committed. All knobs: see the README (Configuration).\n")
+	written := map[string]bool{}
 	for _, kv := range vals {
-		v := kv[1]
-		if strings.ContainsAny(v, " \t") {
-			v = `"` + v + `"`
+		fmt.Fprintf(&b, "%s=%s\n", kv[0], quote(kv[1]))
+		written[kv[0]] = true
+	}
+	var keep []string
+	for k := range old.vals {
+		if !written[k] {
+			keep = append(keep, k)
 		}
-		fmt.Fprintf(&b, "%s=%s\n", kv[0], v)
+	}
+	sort.Strings(keep)
+	if len(keep) > 0 {
+		b.WriteString("# carried forward from the previous config.local:\n")
+		for _, k := range keep {
+			fmt.Fprintf(&b, "%s=%s\n", k, quote(old.vals[k]))
+		}
 	}
 	return os.WriteFile(p, []byte(b.String()), 0o600)
 }

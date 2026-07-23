@@ -106,6 +106,12 @@ func cmdInit(args []string) {
 	if !validDeviceName(o.device) {
 		log.Fatalf("device name %q: use lowercase letters, digits and dashes", o.device)
 	}
+	// o.user lands unquoted inside a root shell heredoc on a fresh VPS
+	// (provisionControlPlane) and as an ssh destination — same "keep it
+	// boring" rule as the device name, checked with the same strictness.
+	if !validDeviceName(o.user) {
+		log.Fatalf("user %q: use lowercase letters, digits and dashes", o.user)
+	}
 
 	// ---- control plane ----
 	control := o.adopt
@@ -242,7 +248,9 @@ func shQuote(s string) string {
 // validDeviceName: the device name becomes a net hostname, a headscale node
 // name and a keys/<name>.pub path component — keep it boring.
 func validDeviceName(s string) bool {
-	if s == "" || len(s) > 63 {
+	// no leading dash: these strings become argv words (ssh destinations,
+	// path components) and must never be option-shaped.
+	if s == "" || len(s) > 63 || s[0] == '-' {
 		return false
 	}
 	for _, r := range s {
