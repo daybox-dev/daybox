@@ -111,5 +111,35 @@ fi
 rm -f "$MARK"
 
 echo
+echo "=== cmd_down: teardown must not depend on the git identity ==="
+# The bug this pins down: cmd_down used to open with need_config, which dies
+# without GIT_NAME/GIT_EMAIL — so a half-edited config.local silently
+# defeated EVERY reap path (idle, unreachable, lifetime cap) while the box
+# billed. This calls the REAL cmd_down (not a stub, unlike above) with the
+# identity absent; it must reach the provider probe and return cleanly.
+MARK=$(mktemp)
+# Fresh subshell + re-source: the check() harness above stubbed cmd_down
+# itself, and this test exists precisely to exercise the REAL one.
+(
+  HOME=$(mktemp -d)
+  export DAYBOX_SOURCE_ONLY=1
+  # shellcheck disable=SC1091
+  source "$(cd "$(dirname "$0")/.." && pwd)/bin/daybox"
+  unset DAYBOX_SOURCE_ONLY GIT_NAME GIT_EMAIL
+  PROFILE=test; PROFILE_STATE=$(mktemp -d); SERVER_NAME=daybox-test
+  provider_check_credentials() { return 0; }
+  provider_probe() { echo probed >> "$MARK"; printf 'null'; }
+  log() { :; }
+  cmd_down
+) >/dev/null 2>&1
+rc=$?
+if [ "$rc" -eq 0 ] && [ -s "$MARK" ]; then
+  PASS=$((PASS+1)); echo "  ✓ cmd_down runs without GIT_NAME/GIT_EMAIL (rc=0, probe reached)"
+else
+  FAIL=$((FAIL+1)); echo "  ✗ cmd_down with no git identity: rc=$rc probed=$([ -s "$MARK" ] && echo yes || echo no) (want rc=0, probed)"
+fi
+rm -f "$MARK"
+
+echo
 echo "passed=$PASS failed=$FAIL"
 [ "$FAIL" -eq 0 ]
