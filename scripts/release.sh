@@ -10,14 +10,17 @@
 #   scripts/release.sh v0.1.0        # stamp this version
 #   scripts/release.sh               # derive from `git describe` (dirty -> refused)
 #
-# Output: dist/ with one static binary per platform + SHA256SUMS.
+# Output: dist/ with one static binary per platform, the source drop, and
+# SHA256SUMS covering all of it.
 #   dist/daybox-darwin-arm64   dist/daybox-darwin-amd64
 #   dist/daybox-linux-amd64    dist/daybox-linux-arm64
+#   dist/daybox-<version>-src.tar.gz
 #   dist/SHA256SUMS
 #
-# After it prints the checksums: verify them, then upload the binaries AND
-# SHA256SUMS to the GitHub Release; publish the SHA256SUMS values on
-# daybox.dev so the installer verifies against a domain we control.
+# After it prints the checksums: verify them, sign SHA256SUMS, then upload
+# to R2 behind daybox.dev — the checklist this script prints at the end is
+# the release procedure. There is no other publication path: the code the
+# public can read only changes when this script cuts a version.
 set -euo pipefail
 
 # Product/binary name, in one place.
@@ -97,6 +100,23 @@ if ls "$ROOT"/keys/*.pub >/dev/null 2>&1; then
     exit 1
 fi
 
+# ---- publication hygiene gate ----
+# Every tracked byte ships, forever, in the source drop below. The denylist
+# is machine-local ON PURPOSE: it names exactly the strings that must never
+# be published, so it cannot live in this tree. One extended regex per
+# line, matched case-insensitively; the canonical list is documented in the
+# internal repo's opensource-hygiene.md.
+DENYLIST="${DAYBOX_DENYLIST:-$HOME/.config/daybox/release-denylist}"
+if [ ! -s "$DENYLIST" ]; then
+    echo "refusing to build: no denylist at $DENYLIST" >&2
+    echo "  (one ERE per line; see opensource-hygiene.md in the internal repo)" >&2
+    exit 1
+fi
+if git grep -Iil -E -f "$DENYLIST" HEAD -- >&2; then
+    echo "refusing to build: denylist hits in the files above — scrub first." >&2
+    exit 1
+fi
+
 echo "building $BIN $VERSION"
 
 # ---- clean output ----
@@ -137,6 +157,17 @@ cp "$DIST/$BIN-agent-linux-amd64" "$PAYDIR/dist/$BIN-agent-linux-amd64"
 # signature over SHA256SUMS, not from rebuilding this identically.
 tar -C "$PAYDIR" -czf "$DIST/$BIN-controlplane.tar.gz" .
 rm -rf "$PAYDIR"
+
+# ---- source drop ----
+# The publication itself: the exact tagged tree via git archive — no
+# history, no authorship metadata, by construction (HEAD is enforced
+# clean-at-tag above, so tree == tag). It lands in the same signed
+# SHA256SUMS as the binaries, so the published source, the hashes, and the
+# binaries can never skew. VERIFY.md (in the tree) documents the
+# reproducible rebuild that ties a binary hash back to this tarball.
+echo "  source drop -> dist/$BIN-$VERSION-src.tar.gz"
+git archive --format=tar.gz --prefix="$BIN-$VERSION/" \
+    -o "$DIST/$BIN-$VERSION-src.tar.gz" HEAD
 
 # ---- checksums ----
 # NB: install.sh is deliberately NOT included here — it pins SHA256SUMS's own
@@ -191,8 +222,14 @@ next, on this laptop (never CI):
      $VERSION/<file> and latest/<file>, with no dl/ in front (an upload
      to dl/... keys is silently never served; it happened once).
   3. upload dist/install.sh to R2 key  site/install.sh
+  4. publish the browsable source tree (from the internal repo):
+       ./deploy.sh --src <path-to>/dist/$BIN-$VERSION-src.tar.gz
+     uploads src/$VERSION/* and flips the src/LATEST pointer that
+     daybox.dev/src/latest/* resolves through.
 
 Step 3 is NOT optional. install.sh pins this release ($VERSION) and the hash
 of its SHA256SUMS; the previously-served installer attests an older release,
 so leaving it in place makes the one-liner fail with a pin mismatch.
+Step 4 is what makes "the code lives at daybox.dev/src" true for this
+release; the FAQ and SECURITY.md links point at it.
 NEXT
