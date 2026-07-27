@@ -20,8 +20,8 @@ SRC = REPO / "remote" / "apply-seed.py"
 PASS = FAIL = 0
 
 
-def stubbin(tmp: Path) -> Path:
-    """apt-get/git/sudo/chown stubs so the real subprocess paths still run."""
+def stubbin(tmp: Path, *, mise: bool = True) -> Path:
+    """apt-get/git/sudo/chown/mise stubs so the real subprocess paths still run."""
     b = tmp / "bin"
     b.mkdir(exist_ok=True)   # apply() may run repeatedly in one sandbox
     (b / "apt-get").write_text('#!/bin/sh\nexit 0\n')
@@ -33,11 +33,20 @@ def stubbin(tmp: Path) -> Path:
     return b
 
 
-def apply(tmp: Path, toml_text: str):
+def apply(tmp: Path, toml_text: str, *, mise: bool = True):
     """Run apply-seed.py against sandboxed roots. Returns (proc, home, state)."""
     home, state, repos = tmp / "home", tmp / "state", tmp / "repos"
     for d in (home / "tester", state, repos):
         d.mkdir(parents=True, exist_ok=True)
+    if mise:
+        # apply-seed requires the materializer AT state/bin/mise (the exact
+        # contract), and the rendered env file puts state/bin first on PATH —
+        # so this stub is both the existence check's target and what runs.
+        # It logs each invocation so tests can assert install/lock behaviour.
+        (state / "bin").mkdir(exist_ok=True)
+        (state / "bin" / "mise").write_text(
+            '#!/bin/sh\necho "mise $*" >> "${MISE_LOG:-/dev/null}"\nexit 0\n')
+        (state / "bin" / "mise").chmod(0o755)
     cfg = tmp / "profile.toml"
     cfg.write_text(toml_text)
     code = (
@@ -51,12 +60,13 @@ def apply(tmp: Path, toml_text: str):
     )
     env = dict(os.environ, PATH=f"{stubbin(tmp)}:{os.environ['PATH']}",
                HOME=str(home / "tester"),   # so '~' in a seed command stays sandboxed
+               MISE_LOG=str(tmp / "mise.log"),
                PYTHONDONTWRITEBYTECODE="1")
     p = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, env=env)
     return p, home / "tester", state
 
 
-def case(name, toml_text, expect, want_status=None, pre=None, then=None):
+def case(name, toml_text, expect, want_status=None, pre=None, then=None, mise=True):
     """expect: 'ok' | 'fail'. `then(home, state)` asserts the resulting state."""
     global PASS, FAIL
     with tempfile.TemporaryDirectory() as d:
@@ -65,7 +75,7 @@ def case(name, toml_text, expect, want_status=None, pre=None, then=None):
             (tmp / "home" / "tester").mkdir(parents=True, exist_ok=True)
             (tmp / "state").mkdir(parents=True, exist_ok=True)
             pre(tmp / "home" / "tester", tmp / "state")
-        p, home, state = apply(tmp, toml_text)
+        p, home, state = apply(tmp, toml_text, mise=mise)
         got = "ok" if p.returncode == 0 else "fail"
         status = (tmp / "status").read_text() if (tmp / "status").exists() else ""
         ok = got == expect
@@ -157,6 +167,62 @@ case("would clobber a real file", '[persist]\n".claude" = "claude"', "fail",
 case("would clobber a real directory", '[persist]\n".config" = "cfg"', "fail",
      "not a symlink", pre=lambda h, s: (h / ".config").mkdir())
 case("[persist] is not a table", 'persist = "nope"', "fail", "must be a table")
+
+print("\n=== [tools]: declared pins render a manifest and materialize ===")
+case("pins render quoted into the manifest, install runs",
+     '[tools]\nnode = "24.18.0"\n"npm:@scope/pkg" = "1.2.3"', "ok", "ok",
+     then=lambda h, s: '"node" = "24.18.0"' in (s / "mise/config/config.toml").read_text()
+     and '"npm:@scope/pkg" = "1.2.3"' in (s / "mise/config/config.toml").read_text()
+     and "install" in (s.parent / "mise.log").read_text())
+case("no lockfile means resolve-then-freeze, not a locked no-op",
+     '[tools]\nnode = "24.18.0"', "ok", "ok",
+     then=lambda h, s: "lock -g" in (s.parent / "mise.log").read_text())
+case("[tools.settings] render 1:1 into [settings]",
+     '[tools]\nnode = "1"\n[tools.settings]\nlocked = true\nminimum_release_age = "3d"',
+     "ok", "ok",
+     then=lambda h, s: "locked = true" in (s / "mise/config/config.toml").read_text()
+     and 'minimum_release_age = "3d"' in (s / "mise/config/config.toml").read_text())
+case("shellrc gains the env hook",
+     '[tools]\nnode = "1"', "ok", "ok",
+     then=lambda h, s: "mise/env" in (s / "shellrc").read_text()
+     and "MISE_DATA_DIR" in (s / "mise/env").read_text())
+case("empty [tools] wires the env but installs nothing",
+     "[tools]", "ok", "ok",
+     then=lambda h, s: (s / "mise/env").exists()
+     and not (s.parent / "mise.log").exists())
+case("no [tools] leaves no mise trace at all",
+     'packages = ["jq"]', "ok", "ok",
+     then=lambda h, s: not (s / "mise").exists())
+
+print("\n=== [tools] refuses what it cannot render safely ===")
+case("[tools] is not a table", 'tools = "nope"', "fail", "must be a table")
+case("version is not a string", "[tools]\nnode = 24", "fail", "non-empty string")
+case("version with shell metacharacters", '[tools]\nnode = "1; rm -rf /"', "fail",
+     "not a plain version pin")
+case("tool name with spaces", '[tools]\n"no spaces" = "1"', "fail",
+     "not a plain tool name")
+case("tool name that looks like a flag", '[tools]\n"--evil" = "1"', "fail",
+     "not a plain tool name")
+case("setting value is a list", '[tools]\nnode = "1"\n[tools.settings]\nx = [1]',
+     "fail", "non-empty string")
+case("pins declared but mise never bootstrapped", '[tools]\nnode = "1"', "fail",
+     "bin/mise is missing", mise=False)
+
+print("\n=== [tools] is idempotent across boots ===")
+with tempfile.TemporaryDirectory() as d:
+    tmp = Path(d)
+    r1 = apply(tmp, '[tools]\nnode = "1"')[0]
+    r2 = apply(tmp, '[tools]\nnode = "1"')[0]
+    shellrc_hooks = sum("mise/env" in line
+                        for line in (tmp / "state" / "shellrc").read_text().splitlines())
+    for label, cond in [
+        ("both boots succeed", r1.returncode == 0 and r2.returncode == 0),
+        ("the shellrc hook is appended exactly once", shellrc_hooks == 1),
+    ]:
+        if cond:
+            PASS += 1; print(f"  ✓ {label}")
+        else:
+            FAIL += 1; print(f"  ✗ {label}")
 
 print(f"\npassed={PASS} failed={FAIL}")
 sys.exit(1 if FAIL else 0)

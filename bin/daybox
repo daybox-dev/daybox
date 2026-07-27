@@ -224,23 +224,35 @@ render_user_data() { # $1 = volume id — expand includes + placeholders
     local rendered
     rendered=$(awk -v repo="$REPO_DIR" \
         -v sshkeys="$PROFILE_STATE/authkeys.snippet" \
-        -v seed="$(SEED_FILE_FOR "$PROFILE")" '
+        -v seed="$(SEED_FILE_FOR "$PROFILE")" -v sq="'\''" '
         # include a file, indent kept. Full-line comments are dropped (the
         # authored copies keep them; the box does not need them) because
         # user_data has a hard 32KB API cap and comments were >⅓ of it.
         # First-line #! survives. Lines inside string literals are safe for
         # REPO-AUTHORED files only — none of ours put a #-leading line in a
         # string (checked at authoring time; the render size guard catches
-        # drift). The USER-authored seed gets keep=1: a #-line inside a TOML
-        # multiline [setup] command is content, and stripping it would make
-        # the box run a different command than the profile declares — the
-        # exact silent drift the seed contract forbids.
-        function emit(path, keep,   indent, line, first) {
+        # drift). The USER-authored seed gets toml=1: comments are stripped
+        # there too (a template-copied profile carries ~3KB of them), but
+        # NEVER inside a TOML multiline string — a #-line inside a [setup]
+        # command is content, and stripping it would make the box run a
+        # different command than the profile declares, the exact silent
+        # drift the seed contract forbids. String state is tracked by
+        # toggling on each """ / three-apostrophe delimiter; a comment line
+        # outside a string never toggles (prose may quote delimiters).
+        function toggles(line, instr,   t, n) {
+            t = line
+            n = gsub(/"""/, "", t) + gsub(sq sq sq, "", t)
+            return (instr + n) % 2
+        }
+        function emit(path, toml,   indent, line, first, instr) {
             match($0, /^ */); indent = substr($0, 1, RLENGTH)
-            first = 1
+            first = 1; instr = 0
             while ((getline line < path) > 0) {
-                if (keep || !(line ~ /^[[:space:]]*#/) || (first && line ~ /^#!/))
+                if ((toml && instr) || !(line ~ /^[[:space:]]*#/) \
+                    || (!toml && first && line ~ /^#!/))
                     print indent line
+                if (toml && !(instr == 0 && line ~ /^[[:space:]]*#/))
+                    instr = toggles(line, instr)
                 first = 0
             }
             close(path)
