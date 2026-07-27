@@ -1,4 +1,4 @@
-module github.com/daybox-dev/daybox
+module daybox
 
 go 1.26.4
 

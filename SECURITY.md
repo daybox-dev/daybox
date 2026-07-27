@@ -191,3 +191,11 @@ Ingress control and secret handling live on different axes: net-only ingress
 protects the *box* from the network; short-lived, scoped credentials protect
 your *accounts* from the box. You need both — the second is the only defense
 that works *after* an invited-in dependency is already executing.
+
+## Reporting a vulnerability
+
+Email **security@daybox.dev**. There is no public issue tracker — the code
+is published as signed source drops, not a forge repo — so email is the
+channel. Include the version (`daybox version`) and what you observed;
+you'll get a reply from a human, and a fix ships as a new signed release,
+because that is the only way any code ships.
