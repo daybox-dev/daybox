@@ -27,9 +27,10 @@ exactly this source — not just that both exist.
     sha256sum -c --ignore-missing SHA256SUMS
 
     # 3. rebuild for your platform (any modern `go` auto-downloads the
-    #    exact toolchain go.mod names)
+    #    exact toolchain go.mod names; -buildvcs=false keeps the build
+    #    identical even if you extracted inside some git repo of your own)
     tar xzf "daybox-$V-src.tar.gz" && cd "daybox-$V"
-    CGO_ENABLED=0 go build -trimpath \
+    CGO_ENABLED=0 go build -trimpath -buildvcs=false \
       -ldflags="-s -w -X main.version=$V" -o daybox-rebuilt ./cmd/daybox
 
     # 4. the rebuild, the released binary, and your installed daybox match

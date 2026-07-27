@@ -125,6 +125,11 @@ mkdir -p "$DIST"
 
 # ---- cross-compile ----
 # -trimpath + -s -w + CGO off: reproducible, stripped, static single binaries.
+# -buildvcs=false because this build runs in the git checkout but VERIFY.md's
+# rebuild runs from the source tarball (no .git): the default vcs stamping
+# embeds revision/time/module-version in one and not the other, so the
+# hashes can never match without it (v0.2.3 shipped exactly that mismatch).
+# The version the binary reports comes from -X main.version, not vcs.
 LDFLAGS="-s -w -X main.version=$VERSION"
 cd "$ROOT"      # module root; build the command package ./cmd/daybox
 for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
@@ -132,7 +137,7 @@ for target in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
     out="$DIST/$BIN-$GOOS-$GOARCH"
     echo "  $GOOS/$GOARCH -> ${out#$ROOT/}"
     CGO_ENABLED=0 GOOS="$GOOS" GOARCH="$GOARCH" \
-        go build -trimpath -ldflags="$LDFLAGS" -o "$out" ./cmd/daybox
+        go build -trimpath -buildvcs=false -ldflags="$LDFLAGS" -o "$out" ./cmd/daybox
 done
 
 # devbox pushes still reference the linux/amd64 binary under the agent name;
