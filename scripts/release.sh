@@ -153,11 +153,24 @@ cp "$DIST/$BIN-linux-amd64" "$DIST/$BIN-agent-linux-amd64"
 echo "  control-plane payload -> dist/$BIN-controlplane.tar.gz"
 PAYDIR="$DIST/.payload"
 rm -rf "$PAYDIR"; mkdir -p "$PAYDIR/dist"
-for p in bin remote systemd cloud-init headscale keys install.sh \
-         README.md SECURITY.md LICENSE; do
+for p in bin remote systemd cloud-init headscale keys providers \
+         profile.default.toml install.sh README.md SECURITY.md LICENSE; do
     [ -e "$ROOT/$p" ] && cp -R "$ROOT/$p" "$PAYDIR/"
 done
 cp "$DIST/$BIN-agent-linux-amd64" "$PAYDIR/dist/$BIN-agent-linux-amd64"
+# The payload must carry every $REPO_DIR path bin/daybox dereferences at
+# runtime. A gap here is invisible to dev-checkout inits (pushTree ships the
+# whole clone) and surfaces only on a fresh machine running a release —
+# v0.2.4 shipped without providers/ and every standalone init died at
+# `daybox setup` with "unknown provider 'hetzner'". Fail the build instead.
+for req in bin/daybox remote/controlplane-setup.sh install.sh \
+           providers/hetzner.sh profile.default.toml \
+           cloud-init/cloud-init.yaml.template "dist/$BIN-agent-linux-amd64"; do
+    [ -e "$PAYDIR/$req" ] || {
+        echo "refusing to package an incomplete control-plane payload: missing $req" >&2
+        exit 1
+    }
+done
 # NB: not byte-reproducible (tar/gzip embed mtimes). Integrity comes from the
 # signature over SHA256SUMS, not from rebuilding this identically.
 tar -C "$PAYDIR" -czf "$DIST/$BIN-controlplane.tar.gz" .
