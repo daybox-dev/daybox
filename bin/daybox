@@ -319,6 +319,16 @@ cmd_setup() { # one-time bootstrap of the CURRENT profile (default unless -p)
     need_config
     provider_check_credentials
     provider_prepare_ssh_keys "$KEYS_DIR"
+    # The seed, exactly as profile_add materializes it: setup IS this
+    # profile's creation moment, and a profile without a seed is
+    # unsummonable by design (need_seed). Without this, a fresh install's
+    # first `daybox up` dies right after init declared setup complete.
+    # Never overwrite a seed the user may have edited.
+    if [ ! -f "$PROFILE_CONF/profile.toml" ]; then
+        mkdir -p "$PROFILE_CONF"
+        cp "$REPO_DIR/profile.default.toml" "$PROFILE_CONF/profile.toml"
+        log "seeded profile '$PROFILE' (view: daybox profile seed show $PROFILE)"
+    fi
     local vid; vid=$(ensure_volume)
     log "setup complete for profile '$PROFILE'. volume id: $vid"
 }
