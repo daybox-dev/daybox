@@ -94,7 +94,7 @@ func cmdInit(args []string) {
 	}
 	if o.device == "" {
 		// The suggested default must itself pass validDeviceName — a stock
-		// mac hostname is "Emilios-MacBook-Air", and offering a default we
+		// mac hostname is "Alices-MacBook-Air", and offering a default we
 		// then refuse aborts the whole init on <enter>.
 		host, _ := os.Hostname()
 		def := sanitizeDeviceName(strings.Split(host, ".")[0])

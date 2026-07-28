@@ -6,14 +6,14 @@ import (
 )
 
 // The suggested device-name default comes from the machine hostname; on a
-// stock mac that is "Emilios-MacBook-Air", and v0.2.4 offered it verbatim,
+// stock mac that is "Alices-MacBook-Air", and v0.2.4 offered it verbatim,
 // then fatally rejected it — init died on <enter>. Whatever sanitize
 // returns must be accepted by validDeviceName (or be empty, meaning no
 // default is offered).
 func TestSanitizeDeviceName(t *testing.T) {
 	cases := []struct{ in, want string }{
-		{"Emilios-MacBook-Air", "emilios-macbook-air"},
-		{"Emilio's Mac", "emilio-s-mac"},
+		{"Alices-MacBook-Air", "alices-macbook-air"},
+		{"Alice's Mac", "alice-s-mac"},
 		{"héllo", "h-llo"},
 		{"--weird--", "weird"},
 		{"...", ""},
