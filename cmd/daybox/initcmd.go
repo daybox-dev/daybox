@@ -93,8 +93,21 @@ func cmdInit(args []string) {
 		log.Fatal("git identity is required (boxes commit as you)")
 	}
 	if o.device == "" {
+		// The suggested default must itself pass validDeviceName — a stock
+		// mac hostname is "Emilios-MacBook-Air", and offering a default we
+		// then refuse aborts the whole init on <enter>.
 		host, _ := os.Hostname()
-		o.device = prompt(in, "name for this device on your net", strings.Split(host, ".")[0])
+		def := sanitizeDeviceName(strings.Split(host, ".")[0])
+		for tries := 0; ; tries++ {
+			o.device = prompt(in, "name for this device on your net", def)
+			if validDeviceName(o.device) {
+				break
+			}
+			if tries == 4 {
+				log.Fatalf("device name %q: use lowercase letters, digits and dashes", o.device)
+			}
+			say("  %q won't work: use lowercase letters, digits and dashes", o.device)
+		}
 	}
 	// These values travel into remote shell commands, file paths and a
 	// rendered cloud-init script. Quoting (shQuote below) handles metachars;
@@ -245,6 +258,26 @@ func shQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
+// sanitizeDeviceName bends a proposed name (typically the machine's
+// hostname) into one validDeviceName accepts: lowercased, every other rune
+// becomes a dash, runs collapsed, dashes trimmed off the ends. Returns ""
+// when nothing usable remains — the prompt then simply has no default.
+func sanitizeDeviceName(s string) string {
+	var b strings.Builder
+	for _, r := range strings.ToLower(s) {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+		} else if !strings.HasSuffix(b.String(), "-") {
+			b.WriteByte('-')
+		}
+	}
+	out := strings.Trim(b.String(), "-")
+	if len(out) > 63 {
+		out = strings.Trim(out[:63], "-")
+	}
+	return out
+}
+
 // validDeviceName: the device name becomes a net hostname, a headscale node
 // name and a keys/<name>.pub path component — keep it boring.
 func validDeviceName(s string) bool {
@@ -320,9 +353,12 @@ func scpTo(src, host, dst string) error {
 }
 
 // pushTree tars the checkout into ~/daybox on the control plane, leaving
-// out .git and local build artifacts (dist/ alone is ~80MB).
+// out .git and local build artifacts (dist/ alone is ~80MB). --no-xattrs:
+// macOS stamps files written by a downloaded binary with a provenance xattr,
+// bsdtar ships xattrs by default, and GNU tar on the far end then warns once
+// per file — the metadata is meaningless off-mac, so drop it at the source.
 func pushTree(repo, control string) error {
-	tar := exec.Command("tar", "-C", repo,
+	tar := exec.Command("tar", "-C", repo, "--no-xattrs",
 		"--exclude=./.git", "--exclude=./dist", "--exclude=./cmd/daybox/daybox",
 		"-czf", "-", ".")
 	unpack := exec.Command("ssh", append(sshOpts(true), control,
