@@ -172,11 +172,17 @@ func cmdInit(args []string) {
 	// token: a provisioned plane needs the same token to summon boxes
 	if freshToken != "" {
 		say("• storing the Hetzner token on the control plane (mode 600; it never leaves that box)")
-		c := exec.Command("ssh", append(sshOpts(true), control,
-			"install -m 600 /dev/stdin ~/.config/daybox/token")...)
-		c.Stdin = strings.NewReader(freshToken)
-		c.Stderr = os.Stderr
-		if err := c.Run(); err != nil {
+		// the reader is recreated each attempt so a transport retry re-pipes
+		// the full token — a reader consumed by attempt 1 would send EOF on
+		// attempt 2 and silently store an empty token.
+		err := sshRetry("control plane", func() error {
+			c := exec.Command("ssh", append(sshOpts(true), control,
+				"install -m 600 /dev/stdin ~/.config/daybox/token")...)
+			c.Stdin = strings.NewReader(freshToken)
+			c.Stderr = os.Stderr
+			return c.Run()
+		})
+		if err != nil {
 			log.Fatal(err)
 		}
 	}
@@ -202,7 +208,15 @@ func cmdInit(args []string) {
 	if _, err := sshCapture(control, "test -f ~/.config/daybox/token"); err == nil {
 		say("• registering ssh keys + workspace volume with Hetzner (daybox setup)")
 		if err := sshRun(control, remoteDaybox+" setup"); err != nil {
-			log.Fatal("daybox setup failed on the control plane")
+			why := "the remote command failed (output above)"
+			if sshTransient(err) {
+				why = "the control plane was unreachable (transient ssh trouble) — the command never ran"
+			}
+			log.Fatalf("daybox setup did not complete: %s.\n"+
+				"  the control plane IS up at %s (billing) — finish setup with:\n"+
+				"    daybox init        (idempotent: adopts the existing plane, completes setup)\n"+
+				"  or by hand:\n"+
+				"    ssh %s '%s setup'", why, publicIP, control, remoteDaybox)
 		}
 	} else {
 		say("  NOTE: no Hetzner token on %s yet — summoning needs one:", control)
@@ -358,24 +372,31 @@ func scpTo(src, host, dst string) error {
 // bsdtar ships xattrs by default, and GNU tar on the far end then warns once
 // per file — the metadata is meaningless off-mac, so drop it at the source.
 func pushTree(repo, control string) error {
-	tar := exec.Command("tar", "-C", repo, "--no-xattrs",
-		"--exclude=./.git", "--exclude=./dist", "--exclude=./cmd/daybox/daybox",
-		"-czf", "-", ".")
-	unpack := exec.Command("ssh", append(sshOpts(true), control,
-		"mkdir -p ~/daybox && tar -xzf - -C ~/daybox")...)
-	var err error
-	unpack.Stdin, err = tar.StdoutPipe()
-	if err != nil {
-		return err
-	}
-	tar.Stderr, unpack.Stdout, unpack.Stderr = os.Stderr, os.Stderr, os.Stderr
-	if err := tar.Start(); err != nil {
-		return err
-	}
-	if err := unpack.Run(); err != nil {
-		return err
-	}
-	return tar.Wait()
+	// Retry the whole tar|ssh pair on a transport failure: a blip on the
+	// unpack ssh breaks the pipe (tar then errors too), so both are rebuilt
+	// per attempt — re-tarring is cheap and the unpack overwrites idempotently.
+	return sshRetry("control plane", func() error {
+		tar := exec.Command("tar", "-C", repo, "--no-xattrs",
+			"--exclude=./.git", "--exclude=./dist", "--exclude=./cmd/daybox/daybox",
+			"-czf", "-", ".")
+		unpack := exec.Command("ssh", append(sshOpts(true), control,
+			"mkdir -p ~/daybox && tar -xzf - -C ~/daybox")...)
+		var err error
+		unpack.Stdin, err = tar.StdoutPipe()
+		if err != nil {
+			return err
+		}
+		tar.Stderr, unpack.Stdout, unpack.Stderr = os.Stderr, os.Stderr, os.Stderr
+		if err := tar.Start(); err != nil {
+			return err
+		}
+		uerr := unpack.Run()
+		twerr := tar.Wait()
+		if uerr != nil {
+			return uerr
+		}
+		return twerr
+	})
 }
 
 // provisionControlPlane creates the VPS and a login user on it.
@@ -460,11 +481,10 @@ install -d -m 700 -o %[1]s -g %[1]s /home/%[1]s/.ssh
 cp /root/.ssh/authorized_keys /home/%[1]s/.ssh/authorized_keys
 chown %[1]s:%[1]s /home/%[1]s/.ssh/authorized_keys
 chmod 600 /home/%[1]s/.ssh/authorized_keys`, o.user)
-	// sshOpts pins the identity (set above) + BatchMode, so this fails fast
-	// instead of dropping to an interactive password prompt on auth trouble.
-	c := exec.Command("ssh", append(sshOpts(true), root, userSetup)...)
-	c.Stdout, c.Stderr = os.Stderr, os.Stderr
-	if err := c.Run(); err != nil {
+	// sshRun pins the identity (set above) + BatchMode, so this fails fast
+	// instead of dropping to an interactive password prompt on auth trouble,
+	// and rides out a transient connect blip on the fresh box.
+	if err := sshRun(root, userSetup); err != nil {
 		log.Fatalf("creating user on fresh VPS: %v", err)
 	}
 	return o.user + "@" + ip, token

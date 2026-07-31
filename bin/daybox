@@ -55,6 +55,46 @@ TEMPLATE="$REPO_DIR/cloud-init/cloud-init.yaml.template"
 log() { printf '[daybox] %s\n' "$*" >&2; }
 die() { log "ERROR: $*"; exit 1; }
 
+# ssh_retry / scp_retry run an ssh/scp op, retrying on a transport-level
+# failure: ssh and scp exit 255 when the connection never came up (connect,
+# auth, host-key), and propagate the remote command's own exit code
+# otherwise. 255 is the one a retry can fix — a fresh cloud box (control
+# plane or devbox) can drop a SYN, and without a retry a single ~10s blip
+# aborts the whole op (v0.2.6: init's final `daybox setup` died this way —
+# the plane was up and billing, but unsummonable). A non-255 failure is the
+# remote command itself and is returned immediately, never retried. Every
+# op daybox runs over ssh is idempotent, so a retry is always safe.
+# LABEL is for the retry notice only; it is NOT forwarded to ssh/scp.
+_ssh_backoff() { printf '%s\n' "$((1 << $1))"; } # attempt 1->2s, 2->4s
+ssh_retry() { # LABEL -- then exactly what would follow `ssh`
+    local label=$1; shift
+    local attempt=1 rc s
+    while :; do
+        ssh "$@" && return 0
+        rc=$?
+        [ "$rc" -eq 255 ] || return "$rc"
+        [ "$attempt" -ge 3 ] && { log "$(printf '%s unreachable after 3 attempts (ssh 255)' "$label")"; return 255; }
+        s=$(_ssh_backoff "$attempt")
+        log "$(printf '%s unreachable (ssh 255) — retry %d/2 in %ss' "$label" "$attempt" "$s")"
+        sleep "$s"
+        attempt=$((attempt + 1))
+    done
+}
+scp_retry() { # LABEL -- then exactly what would follow `scp`
+    local label=$1; shift
+    local attempt=1 rc s
+    while :; do
+        scp "$@" && return 0
+        rc=$?
+        [ "$rc" -eq 255 ] || return "$rc"
+        [ "$attempt" -ge 3 ] && { log "$(printf '%s unreachable after 3 attempts (scp 255)' "$label")"; return 255; }
+        s=$(_ssh_backoff "$attempt")
+        log "$(printf '%s unreachable (scp 255) — retry %d/2 in %ss' "$label" "$attempt" "$s")"
+        sleep "$s"
+        attempt=$((attempt + 1))
+    done
+}
+
 mkdir -p "$STATE_DIR"
 if [ -f "$CONF_DIR/config.local" ]; then
     # shellcheck source=/dev/null
@@ -540,12 +580,12 @@ net_join_box() { # $1 = public ip — push agent + single-use ephemeral key.
     [ -n "$key" ] || { log "net: could not mint pre-auth key"; return 1; }
     log "net: enrolling box on the daybox net"
     local sshopts=(-o UserKnownHostsFile="$KNOWN_HOSTS" -o BatchMode=yes -o ConnectTimeout=10)
-    if ! scp -q "${sshopts[@]}" "$NET_AGENT_BIN" "$REPO_DIR/remote/daybox-agent.service" \
+    if ! scp_retry "net: agent copy" -q "${sshopts[@]}" "$NET_AGENT_BIN" "$REPO_DIR/remote/daybox-agent.service" \
              "$REMOTE_USER@$ip:/tmp/"; then
         log "net: could not copy agent to box"; return 1
     fi
     # the key travels via stdin (never argv/ps); single-use + 15min expiry anyway
-    if ! printf '%s\n' "$key" | ssh "${sshopts[@]}" "$REMOTE_USER@$ip" "
+    if ! printf '%s\n' "$key" | ssh_retry "net: agent install" "${sshopts[@]}" "$REMOTE_USER@$ip" "
         set -e
         sudo install -m 755 /tmp/daybox-agent /usr/local/bin/daybox-agent
         sudo install -d -m 700 /var/lib/daybox-agent
@@ -582,7 +622,7 @@ net_node_online() {
 # seed_verdict <ip>: firstboot's verdict on an existing box ("ok", "FAILED…",
 # or empty when unreadable). Bounded: a wedged sshd must not hang the caller.
 seed_verdict() {
-    timeout 20 ssh -o UserKnownHostsFile="$KNOWN_HOSTS" -o BatchMode=yes -o ConnectTimeout=5 \
+    timeout 20 ssh_retry "seed verdict" -o UserKnownHostsFile="$KNOWN_HOSTS" -o BatchMode=yes -o ConnectTimeout=5 \
         "$REMOTE_USER@$1" 'cat /var/lib/daybox/seed.status 2>/dev/null' 2>/dev/null || true
 }
 
@@ -895,7 +935,7 @@ reap_one() { # probe + tick the CURRENT profile's box; reap it when idle/unreach
     # otherwise hang this run forever — Type=oneshot never times out on its
     # own and the timer never refires while the unit is active, so reaping
     # would stop for every profile while the boxes bill.
-    if probe=$(timeout 30 ssh -o UserKnownHostsFile="$KNOWN_HOSTS" -o BatchMode=yes -o ConnectTimeout=5 \
+    if probe=$(timeout 30 ssh_retry "reap: probe" -o UserKnownHostsFile="$KNOWN_HOSTS" -o BatchMode=yes -o ConnectTimeout=5 \
             "$REMOTE_USER@$ip" \
             "ss -Htn state established '( sport = :22 )' | grep -vc '$LITTLEBOX_IP' ; cut -d' ' -f1 /proc/loadavg ; find /work/state/claude/projects -type f -newermt '-10 minutes' 2>/dev/null | head -1" \
             2>/dev/null); then
