@@ -605,6 +605,10 @@ net_join_box() { # $1 = public ip — push agent + single-use ephemeral key.
             '[.[] | select(.name==$h and ((.online // .connected // false)==true))][0].ip_addresses[0] // empty')
         if [ -n "$addr" ]; then
             log "net: box online at $addr (from an enrolled device: ssh over 'daybox-agent dial')"
+            # record the agent version this box was summoned with — 'daybox
+            # status' shows it so a mixed-version fleet is visible after a
+            # plane upgrade (a box keeps its summoned version until reaped)
+            "$NET_AGENT_BIN" version > "$PROFILE_STATE/agent_version" 2>/dev/null || true
             return 0
         fi
         sleep 2
@@ -761,6 +765,21 @@ status_one() {
         '"  big box: \(.name)  id=\(.id)  \(.type)  \(.status)
   ip: \(.ip)
   created: \(.created)   (~€" + $p + "/h gross)"'
+    # fleet version visibility: the box's summoned agent vs. the plane's
+    # current, so a stale box is obvious after 'daybox upgrade' (boxes keep
+    # their summoned version until reaped; 'down'+'up' rotates one)
+    local box_agent plane_agent
+    box_agent=$(cat "$PROFILE_STATE/agent_version" 2>/dev/null || true)
+    plane_agent=$("$NET_AGENT_BIN" version 2>/dev/null || echo "?")
+    if [ -n "$box_agent" ]; then
+        if [ "$box_agent" = "$plane_agent" ]; then
+            echo "  agent: $box_agent  (current)"
+        else
+            echo "  agent: $box_agent  (plane: $plane_agent — rotate with: daybox down + up)"
+        fi
+    else
+        echo "  agent: ?  (plane: $plane_agent)"
+    fi
     echo "  ingress: locked down (public ssh closed; net + control plane only)"
     echo "  idle ticks: $(cat "$PROFILE_STATE/idle_ticks" 2>/dev/null || echo 0)/$(( REAP_AFTER_IDLE_MIN / 5 )) (reaper checks every 5min)"
 
