@@ -64,6 +64,22 @@ below is a consequence of those three sentences.
   of TOFU: an attacker in the network path during that first scan window
   could pin their own key. The window is seconds long, from the control
   plane's connection, against a box only it knows exists — but it exists.
+- **A box can propose a profile change; only your laptop can approve one.**
+  A profile's seed is root-at-boot on every future box, so a writable seed
+  would be machine-persistence laundered through provisioning — the seed
+  stays one-way. What a box *can* do is submit a proposal to the **agent
+  relay** on the control plane: a small daemon (opt-in, disabled by
+  default) that listens only on the private net, identifies the caller by
+  net identity (WhoIs), binds it to the one profile it was summoned under,
+  and stages the proposal as an inert file. Review happens on the laptop as
+  a full diff with `[setup]`/`[persist]` changes flagged — the
+  supply-chain-bearing lines are impossible to skim past — and nothing
+  takes effect until you accept. Honestly said: the relay is the first
+  custom resident daemon on the control plane (everything else there is
+  headscale + sshd + a timer), and the node→profile binding is only as
+  strong as the net identity a root-compromised box holds — which is why
+  the relay's ceiling is proposal spam, never an applied change. The human
+  diff review is the boundary; the relay just does the paperwork.
 - **A hard cost cap (shipping for v1).** Independent of the idle reaper, a
   configurable max-lifetime / spend ceiling force-reaps a box regardless of
   activity, so a runaway process can't quietly bill all weekend. (The idle

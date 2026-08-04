@@ -44,6 +44,7 @@ setup:
 plumbing (used by machines more than people):
   dial HOST PORT   ssh ProxyCommand over the net
   join             devbox-side net node (runs under systemd on boxes)
+  relay            control-plane proposal intake (runs under systemd there)
   ip               bring the net node up, print its address
   version          print the binary version
 
@@ -83,6 +84,8 @@ func main() {
 		cmdProfile(args)
 	case "join":
 		cmdJoin(args)
+	case "relay":
+		cmdRelay(args)
 	case "dial":
 		cmdDial(args)
 	case "ip":
