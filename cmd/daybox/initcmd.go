@@ -151,7 +151,7 @@ func cmdInit(args []string) {
 			log.Fatalf("pushing repo: %v", err)
 		}
 	} else {
-		say("• ~/daybox already present on %s — leaving it as-is", control)
+		say("• ~/daybox already present on %s — leaving it as-is ('daybox upgrade' replaces it)", control)
 	}
 
 	// agent binary for devbox pushes + this device's key for box access

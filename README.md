@@ -70,6 +70,17 @@ Everyday verbs, all from the laptop: `up` · `ssh` · `status` · `down` ·
 `net`. Attach is plain ssh + tmux — any terminal. `init` is idempotent:
 re-run it any time to heal drift.
 
+**Upgrading.** `daybox upgrade` moves an existing deployment to a newer
+release: it fetches the signed payload (latest, or `--version vX.Y.Z`),
+replaces `~/daybox` on the control plane (previous tree kept at
+`~/daybox.prev` for rollback), refreshes the agent binary, and re-runs the
+same idempotent setup — no interview, and nothing that *is* your deployment
+(config, net, token, volumes, profiles) is touched. New boxes summon at the
+new version; a running box keeps the version it was summoned with until
+reaped (`daybox-agent version` on a box tells you which). The laptop binary
+doesn't self-update: re-run the installer, or `cmd/daybox/build.sh` +
+`install.sh` from a checkout.
+
 <details>
 <summary>Manual setup (what init automates)</summary>
 
