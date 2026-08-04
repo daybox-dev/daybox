@@ -3,6 +3,7 @@ module daybox
 go 1.26.4
 
 require (
+	github.com/BurntSushi/toml v1.5.0
 	golang.org/x/crypto v0.52.0
 	golang.org/x/term v0.43.0
 	tailscale.com v1.100.0

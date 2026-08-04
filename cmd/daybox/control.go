@@ -210,9 +210,15 @@ func cmdDelegateP(verb string, args []string) {
 	delegate(remoteDaybox+prof+" "+verb, false)
 }
 
-// cmdProfile forwards the `profile` command group (add|ls|use|rename|rm)
-// straight to the control plane, quoting each token.
+// cmdProfile forwards the `profile` command group (add|ls|use|rename|rm|seed)
+// straight to the control plane, quoting each token — except `edit`, which
+// runs $EDITOR here on the laptop (profilecmd.go): the plane stores the
+// seed, the laptop authors it.
 func cmdProfile(args []string) {
+	if len(args) > 0 && args[0] == "edit" {
+		cmdProfileEdit(args[1:])
+		return
+	}
 	cmd := remoteDaybox + " profile"
 	for _, a := range args {
 		cmd += " " + shq(a)
