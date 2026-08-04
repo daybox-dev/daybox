@@ -215,9 +215,24 @@ func cmdDelegateP(verb string, args []string) {
 // runs $EDITOR here on the laptop (profilecmd.go): the plane stores the
 // seed, the laptop authors it.
 func cmdProfile(args []string) {
-	if len(args) > 0 && args[0] == "edit" {
-		cmdProfileEdit(args[1:])
-		return
+	if len(args) > 0 {
+		// the laptop-authority subverbs (profilecmd.go, proposalcmd.go):
+		// editing and proposal review never delegate — approval is a
+		// laptop-side action by design (§1e).
+		switch args[0] {
+		case "edit":
+			cmdProfileEdit(args[1:])
+			return
+		case "proposals":
+			cmdProfileProposals(args[1:])
+			return
+		case "accept":
+			cmdProfileAccept(args[1:])
+			return
+		case "reject":
+			cmdProfileReject(args[1:])
+			return
+		}
 	}
 	cmd := remoteDaybox + " profile"
 	for _, a := range args {

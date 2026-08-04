@@ -34,6 +34,7 @@ everyday:
   down [-p prof]       delete the box now (billing stops)
   profile ...          add|ls|use|rename|rm your daybox profiles
   profile edit [name]  edit a profile's seed in $EDITOR (validated, applied next up)
+  profile proposals    review box-proposed seed changes (accept <id> | reject <id>)
 
 setup:
   init             set up (or adopt) a control plane + enroll this device
