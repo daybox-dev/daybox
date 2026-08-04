@@ -19,11 +19,8 @@ import (
 // (or adopts) the control plane, and enrolls this device. Idempotent: every
 // remote step skips what already exists, so re-running heals drift.
 //
-// Runs either from a repo checkout (--repo, or auto-detected from cwd — the
-// developer path) or, with no checkout at all, from a pinned and signed
-// release payload downloaded on the fly (the curl-installed path). Both
-// produce a directory laid out the same way, so everything below this line is
-// identical either way. See payload.go.
+// Provisions from a pinned, signed release payload downloaded on the fly,
+// unpacked to a directory laid out like a checkout. See payload.go.
 
 type initOpts struct {
 	adopt      string // ssh destination of an existing box
@@ -36,7 +33,6 @@ type initOpts struct {
 	gitName    string
 	gitEmail   string
 	device     string
-	repo       string
 	version    string
 	noEnroll   bool
 }
@@ -54,8 +50,7 @@ func cmdInit(args []string) {
 	fs.StringVar(&o.gitName, "git-name", "", "git author name for work done on your boxes")
 	fs.StringVar(&o.gitEmail, "git-email", "", "git author email")
 	fs.StringVar(&o.device, "device", "", "this device's name on the net (default: hostname)")
-	fs.StringVar(&o.repo, "repo", "", "daybox repo checkout (default: auto-detect from cwd)")
-	fs.StringVar(&o.version, "version", "", "release payload to provision from (default: a checkout if present, else latest)")
+	fs.StringVar(&o.version, "version", "", "release payload to provision from (default: the binary's pinned version; latest for dev builds)")
 	fs.BoolVar(&o.noEnroll, "no-enroll", false, "skip enrolling this device")
 	fs.Parse(args)
 
@@ -67,7 +62,7 @@ func cmdInit(args []string) {
 	say("account; you'll see the live price before anything is created.")
 	say("")
 
-	repo, cleanupPayload := resolvePayload(o.repo, o.version)
+	repo, cleanupPayload := resolvePayload(o.version)
 	defer cleanupPayload()
 
 	// ---- interview (only for what flags didn't provide) ----
@@ -158,7 +153,7 @@ func cmdInit(args []string) {
 	say("• installing the net agent + this device's ssh key on the control plane")
 	agentBin := filepath.Join(repo, "dist", "daybox-agent-linux-amd64")
 	if _, err := os.Stat(agentBin); err != nil {
-		log.Fatalf("missing %s\n  from a checkout: run cmd/daybox/build.sh first\n  from a release: the payload is incomplete — report it", agentBin)
+		log.Fatalf("missing %s in the release payload — report it (the payload is incomplete)", agentBin)
 	}
 	sshCapture(control, "mkdir -p ~/.config/daybox/agent ~/.config/daybox/keys")
 	if err := scpTo(agentBin, control, ".config/daybox/agent/daybox-agent"); err != nil {
@@ -314,37 +309,6 @@ func gitDefault(key string) string {
 		return ""
 	}
 	return strings.TrimSpace(string(out))
-}
-
-func isRepo(dir string) bool {
-	_, err := os.Stat(filepath.Join(dir, "remote", "controlplane-setup.sh"))
-	return err == nil
-}
-
-// lookupRepo walks up from cwd looking for a checkout. Unlike findRepo it
-// reports absence instead of exiting, so init can fall back to a release.
-func lookupRepo() (string, bool) {
-	dir, _ := os.Getwd()
-	for d := dir; d != "/" && d != "."; d = filepath.Dir(d) {
-		if isRepo(d) {
-			return d, true
-		}
-	}
-	return "", false
-}
-
-func findRepo(flagVal string) string {
-	if flagVal != "" {
-		if !isRepo(flagVal) {
-			log.Fatalf("%s doesn't look like a daybox checkout", flagVal)
-		}
-		return flagVal
-	}
-	if dir, ok := lookupRepo(); ok {
-		return dir
-	}
-	log.Fatal("not inside a daybox checkout — pass --repo /path/to/daybox")
-	return ""
 }
 
 func findLocalPubkey() string {

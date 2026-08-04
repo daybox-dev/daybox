@@ -7,8 +7,8 @@ package main
 // *is* the deployment (identity, net, token, volumes, profiles).
 //
 // In order:
-//   1. resolve the payload exactly like init (checkout wins, else a signed,
-//      checksum-verified release download — same trust anchor, payload.go)
+//   1. resolve the payload exactly like init (a signed, checksum-verified
+//      release download — same trust anchor, payload.go)
 //   2. REPLACE ~/daybox on the control plane (fresh unpack + swap, previous
 //      tree kept at ~/daybox.prev) — init's first-push untars into an empty
 //      dir, but untarring over a live tree would leave files the new
@@ -31,9 +31,8 @@ import (
 
 func cmdUpgrade(args []string) {
 	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
-	var repoFlag, versionFlag string
-	fs.StringVar(&repoFlag, "repo", "", "daybox repo checkout to push (default: auto-detect from cwd)")
-	fs.StringVar(&versionFlag, "version", "", "release payload to upgrade to (default: a checkout if present, else latest)")
+	var versionFlag string
+	fs.StringVar(&versionFlag, "version", "", "release payload to upgrade to (default: the binary's pinned version; latest for dev builds)")
 	fs.Parse(args)
 
 	cfg := loadConfig()
@@ -42,7 +41,7 @@ func cmdUpgrade(args []string) {
 		log.Fatal("no CONTROL_HOST in config.local — this device has no deployment to upgrade; 'daybox init' sets one up")
 	}
 
-	repo, cleanupPayload := resolvePayload(repoFlag, versionFlag)
+	repo, cleanupPayload := resolvePayload(versionFlag)
 	defer cleanupPayload()
 
 	say("• checking ssh access to %s", control)
@@ -77,7 +76,7 @@ func cmdUpgrade(args []string) {
 	say("• refreshing the net agent (what every summoned box runs)")
 	agentBin := filepath.Join(repo, "dist", "daybox-agent-linux-amd64")
 	if _, err := os.Stat(agentBin); err != nil {
-		log.Fatalf("missing %s\n  from a checkout: run cmd/daybox/build.sh first\n  from a release: the payload is incomplete — report it", agentBin)
+		log.Fatalf("missing %s in the release payload — report it (the payload is incomplete)", agentBin)
 	}
 	if err := scpTo(agentBin, control, ".config/daybox/agent/daybox-agent"); err != nil {
 		log.Fatal(err)

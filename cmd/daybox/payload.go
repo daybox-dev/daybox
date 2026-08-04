@@ -2,11 +2,11 @@ package main
 
 // payload.go — where `daybox init` gets the control-plane tree from.
 //
-// A curl-installed binary has no repo checkout, so init cannot tar a local
-// clone. Instead it downloads a pinned, signed control-plane payload and
-// unpacks it to a temp dir laid out exactly like a checkout — so every
-// downstream step (pushTree, the agent binary, controlplane-setup.sh) works
-// unchanged whether the tree came from a release or from a developer's clone.
+// init downloads a pinned, signed control-plane payload and unpacks it to a
+// temp dir laid out exactly like a checkout — so every downstream step
+// (pushTree, the agent binary, controlplane-setup.sh) works against the same
+// layout. The control plane only ever runs a signed release; there is no
+// in-tree path to push a local clone.
 //
 // Integrity mirrors the installer, deliberately: the anchor is the minisign
 // public key pinned below, not the host the bytes came from. SHA256SUMS is
@@ -277,23 +277,13 @@ func fetchControlPlanePayload(version string) (string, error) {
 }
 
 // resolvePayload decides where the control-plane tree comes from:
-//   - explicit --repo: that checkout
-//   - explicit --version: that release, even inside a checkout
-//   - otherwise: an auto-detected checkout if there is one (the dev path),
-//     else the pinned release (the curl-installed path)
+//   - explicit --version: that signed release
+//   - otherwise: the pinned release — the binary's own version (or "latest"
+//     for dev builds)
 //
-// Returns the tree dir and a cleanup func for anything it downloaded.
-func resolvePayload(flagRepo, flagVersion string) (string, func()) {
-	noop := func() {}
-	if flagRepo != "" {
-		return findRepo(flagRepo), noop
-	}
-	if flagVersion == "" {
-		if dir, ok := lookupRepo(); ok {
-			say("• using the daybox checkout at %s", dir)
-			return dir, noop
-		}
-	}
+// The control plane only ever runs a signed, published release. Returns the
+// tree dir and a cleanup func for the download.
+func resolvePayload(flagVersion string) (string, func()) {
 	// A released binary pins its own version, and fetchControlPlanePayload
 	// additionally requires the signed SHA256SUMS to attest that version in
 	// its trusted comment — so an artifact-store writer can neither point a
@@ -308,7 +298,7 @@ func resolvePayload(flagRepo, flagVersion string) (string, func()) {
 			ver = "latest"
 		}
 	}
-	say("• no checkout here — fetching the signed %s control-plane payload", ver)
+	say("• fetching the signed %s control-plane payload", ver)
 	dir, err := fetchControlPlanePayload(ver)
 	if err != nil {
 		log.Fatalf("%v", err)
