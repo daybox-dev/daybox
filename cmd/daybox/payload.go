@@ -39,6 +39,10 @@ const (
 	// Artifact base and integrity base. Separate on purpose (see above).
 	defaultArtifactBase = "https://daybox.dev/dl"
 	defaultVerifyBase   = "https://daybox.dev/dl"
+	// The live installer — where "what's current" is published. TLS-trusted
+	// only (it is its own anchor, not signed by the release key), matching
+	// the curl|sh one-liner's trust model.
+	defaultInstallerURL = "https://daybox.dev/install.sh"
 	controlPlaneAsset   = "daybox-controlplane.tar.gz"
 	maxPayloadBytes     = 64 << 20 // a control-plane tree is ~250KB; cap the blast radius
 )
@@ -49,10 +53,11 @@ const (
 // Overridable at build time for tests: -ldflags "-X main.minisignPubKey=..."
 var minisignPubKey = "RWSIiu1rtvgQzS1cqko1+oQxjHyw07jZqyzaid/zVPFIzxKyQ+rkz0/2"
 
-// artifactBase/verifyBase are vars so tests can point them at a local server.
+// artifactBase/verifyBase/installerURL are vars so tests can point them at a local server.
 var (
 	artifactBase = defaultArtifactBase
 	verifyBase   = defaultVerifyBase
+	installerURL = defaultInstallerURL
 )
 
 // ---------------------------------------------------------------- minisign --

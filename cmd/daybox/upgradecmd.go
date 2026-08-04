@@ -1,20 +1,25 @@
 package main
 
-// upgradecmd.go — `daybox upgrade`: move an existing deployment's control
-// plane to a newer release. init answers "make me a deployment"; upgrade
-// answers "my deployment is fine, its code is old" — so it runs with NO
-// interview, learns everything from config.local, and never touches what
-// *is* the deployment (identity, net, token, volumes, profiles).
+// upgradecmd.go — `daybox upgrade`: bring the laptop and the control
+// plane to the live release in one command. init answers "make me a
+// deployment"; upgrade answers "my deployment is fine, its code is old" —
+// so it runs with NO interview, learns everything from config.local, and
+// never touches what *is* the deployment (identity, net, token, volumes,
+// profiles).
 //
 // In order:
-//   1. resolve the payload exactly like init (a signed, checksum-verified
+//   1. self-update the laptop if the live release is ahead (no -version
+//      only): run the installer, then syscall.Exec the new binary so the
+//      plane gets the new version, not the old one this process still is.
+//      Skipped for dev builds and explicit -version pins. (selfupdate.go)
+//   2. resolve the payload exactly like init (a signed, checksum-verified
 //      release download — same trust anchor, payload.go)
-//   2. REPLACE ~/daybox on the control plane (fresh unpack + swap, previous
+//   3. REPLACE ~/daybox on the control plane (fresh unpack + swap, previous
 //      tree kept at ~/daybox.prev) — init's first-push untars into an empty
 //      dir, but untarring over a live tree would leave files the new
 //      release retired sitting there, shadowing reality
-//   3. refresh the agent binary the plane pushes to every summoned box
-//   4. re-run the same idempotent controlplane-setup.sh init runs
+//   4. refresh the agent binary the plane pushes to every summoned box
+//   5. re-run the same idempotent controlplane-setup.sh init runs
 //
 // Boxes pick the new version up at their next summon; a running box keeps
 // the version it was summoned with until it is reaped or downed.
@@ -27,6 +32,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 func cmdUpgrade(args []string) {
@@ -39,6 +45,35 @@ func cmdUpgrade(args []string) {
 	control := cfg.controlHost()
 	if control == "" {
 		log.Fatal("no CONTROL_HOST in config.local — this device has no deployment to upgrade; 'daybox init' sets one up")
+	}
+
+	// Self-update the laptop (no explicit -version only): if the live release
+	// is ahead of this binary, install it and re-exec, so the plane gets the
+	// new version instead of the old one this process still is. Skipped for
+	// dev builds (a local build is changes under test — don't clobber it) and
+	// when -version pins one explicitly (a targeted push, not "bring me
+	// current"). Unreachable installer => non-fatal: proceed with the binary's
+	// own pinned version (the pre-self-update behavior).
+	if versionFlag == "" && version != "dev" {
+		if latest, ok := latestRelease(); ok {
+			if isNewer(latest, version) {
+				say("• self-updating the laptop: %s → %s (so the plane gets it too)", version, latest)
+				if err := runSelfUpdate(); err != nil {
+					log.Fatalf("self-update failed: %v — the control plane was not touched", err)
+				}
+				exe, err := os.Executable()
+				if err != nil {
+					log.Fatalf("self-updated but could not re-exec: %v — re-run 'daybox upgrade'", err)
+				}
+				say("  re-launching %s", exe)
+				if err := syscall.Exec(exe, os.Args, os.Environ()); err != nil {
+					log.Fatalf("re-exec failed: %v — re-run 'daybox upgrade'", err)
+				}
+				return // unreachable: syscall.Exec replaced the process
+			}
+		} else {
+			say("• could not check for a newer release (installer unreachable) — continuing")
+		}
 	}
 
 	repo, cleanupPayload := resolvePayload(versionFlag)
