@@ -232,6 +232,11 @@ func cmdProfile(args []string) {
 		case "reject":
 			cmdProfileReject(args[1:])
 			return
+		case "propose":
+			// box-side: reads the local seed, talks to the relay — the
+			// only profile subverb that runs on a summoned box
+			cmdProfilePropose(args[1:])
+			return
 		}
 	}
 	cmd := remoteDaybox + " profile"

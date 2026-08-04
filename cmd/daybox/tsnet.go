@@ -104,12 +104,24 @@ func cmdJoin(args []string) {
 	f := addNetFlags(fs, "/var/lib/daybox-agent")
 	port := fs.Int("port", 22, "port to expose on the net")
 	target := fs.String("target", "127.0.0.1:22", "local address to proxy to")
+	relayLocal := fs.String("relay-local", fmt.Sprintf("127.0.0.1:%d", relayDefaultPort),
+		"localhost listener proxied to the control plane's relay (empty disables)")
+	relayPeer := fs.String("relay-peer", fmt.Sprintf("daybox-relay:%d", relayDefaultPort),
+		"the relay's name:port on the net")
 	fs.Parse(args)
 
 	s := f.server(true)
 	defer s.Close()
 	ip := up(s)
 	log.Printf("joined as %s (%s)", ip, f.hostname)
+
+	// `daybox profile propose` needs to reach the relay AS this box: net
+	// identity lives in this process, so the agent lends it — a localhost
+	// door that leads to exactly one place, the relay's inert proposal
+	// intake (it opens no new inbound surface)
+	if *relayLocal != "" {
+		go relayProxy(s, *relayLocal, *relayPeer)
+	}
 
 	ln, err := s.Listen("tcp", fmt.Sprintf(":%d", *port))
 	if err != nil {
@@ -123,6 +135,52 @@ func cmdJoin(args []string) {
 			continue
 		}
 		go proxy(c, *target)
+	}
+}
+
+// relayProxy accepts on a localhost address and pipes each connection to
+// the relay over the net, resolving the relay's bare peer name per
+// connection (the relay may enroll after this box did).
+func relayProxy(s *tsnet.Server, local, peer string) {
+	ln, err := net.Listen("tcp", local)
+	if err != nil {
+		log.Printf("relay proxy: %v (propose disabled on this box)", err)
+		return
+	}
+	log.Printf("relay proxy: %s → %s", local, peer)
+	for {
+		c, err := ln.Accept()
+		if err != nil {
+			log.Printf("relay proxy accept: %v", err)
+			time.Sleep(time.Second)
+			continue
+		}
+		go func() {
+			defer c.Close()
+			host, port, err := net.SplitHostPort(peer)
+			if err != nil {
+				log.Printf("relay proxy: bad peer %q: %v", peer, err)
+				return
+			}
+			if net.ParseIP(host) == nil {
+				if ip, ok := resolvePeer(s, host); ok {
+					host = ip
+				}
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			t, err := s.Dial(ctx, "tcp", net.JoinHostPort(host, port))
+			cancel()
+			if err != nil {
+				log.Printf("relay proxy dial: %v (is daybox-relay enabled on the control plane?)", err)
+				return
+			}
+			defer t.Close()
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() { defer wg.Done(); io.Copy(t, c); halfClose(t) }()
+			go func() { defer wg.Done(); io.Copy(c, t); halfClose(c) }()
+			wg.Wait()
+		}()
 	}
 }
 
