@@ -277,16 +277,23 @@ packages = ["ripgrep", "jq", "build-essential"]     # apt, every boot
 repos    = ["git@github.com:you/thing.git"]         # cloned into /work/repos
 
 [persist]                          # symlinked onto the volume; survives reaps
-".claude"             = "claude"
-".local/share/claude" = "claude-share"
+".claude/"             = "claude"
+".local/share/claude/" = "claude-share"
 
 [setup]
-once       = ["curl -fsSL https://claude.ai/install.sh | bash"]
-every_boot = ["npm install -g pnpm@10"]
+once = ["curl -fsSL https://claude.ai/install.sh | bash"]
+
+[tools]                            # exact pins, materialized onto the volume
+node = "24.18.0"
+"npm:@anthropic-ai/claude-code" = "2.1.220"
 ```
 
 `daybox profile add` writes one from a template; `daybox profile seed
 show|init|path` manages it.
+
+In `[persist]`, a trailing slash declares a directory — created on the volume
+up front, so tools can write into it on a brand-new workspace. No slash means
+a file: the link dangles until the tool first writes it.
 
 **`once` vs `every_boot`** is the distinction that matters. The root disk is
 rebuilt on every summon, so anything installed there must be reinstalled each
@@ -294,6 +301,21 @@ boot (`every_boot`). Anything that installs into `/work` persists, so its
 installer should run `once` per volume — re-running it every boot is a wasted
 download and a repeated supply-chain exposure. Editing a `once` command makes
 it run again, because the declaration changed.
+
+**`[tools]` is where tool installs belong.** Exact version pins — `node`,
+`npm:<pkg>`, `cargo:<crate>`, `ubi:<owner/repo>` — materialized by
+[mise](https://mise.jdx.dev) onto the volume: payloads survive reaps, nothing
+re-downloads at boot, and a replacement volume comes up identical. Installs
+are checksum-verified where the backend provides it and frozen in a lockfile;
+the template's `[tools.settings]` defaults (`locked = true`,
+`minimum_release_age = "3d"`) refuse checksum drift on reinstall and ignore
+npm releases younger than three days, transitive included. mise itself
+bootstraps from a pinned, sha256-verified `[setup] once` step shipped in the
+template — delete that step and `[tools]` together if you want none of it.
+Prefer a `[tools]` pin over an `every_boot` npm/pip install: the latter
+re-downloads an unpinned tool onto the disposable root disk every summon.
+Pair a tool's pin with a `[persist]` mapping for its state directory (its
+auth and sessions), and the tool stays warm across reaps end to end.
 
 **daybox does not vouch for `[setup]`.** Those strings run verbatim as your
 login user. A line piping an installer into a shell is your informed choice,
