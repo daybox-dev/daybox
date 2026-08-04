@@ -36,6 +36,7 @@ everyday:
 
 setup:
   init             set up (or adopt) a control plane + enroll this device
+  upgrade          move the control plane to a newer release (no interview)
   enroll           (re-)enroll this device on your private net
 
 plumbing (used by machines more than people):
@@ -60,6 +61,8 @@ func main() {
 	switch os.Args[1] {
 	case "init":
 		cmdInit(args)
+	case "upgrade":
+		cmdUpgrade(args)
 	case "enroll":
 		cmdEnroll(args)
 	case "up":
