@@ -20,6 +20,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"golang.org/x/sys/unix"
+	"golang.org/x/term"
 )
 
 type proposal struct{ profile, id string }
@@ -294,3 +297,120 @@ func rmProposal(host string, p proposal) {
 		log.Fatalf("could not remove proposal %s: %v", p.id, err)
 	}
 }
+
+// maybeOfferProposalReview is `daybox up`'s pre-summon hook (§1e P6): when
+// the profile about to be rendered has pending proposals, offer a review —
+// without ever blocking the summon. Timeout, 'n', a non-tty stdin, or any
+// error here all mean "summon with the profile as it stands".
+func maybeOfferProposalReview(host, profileArg string) {
+	ps, err := listProposals(host)
+	if err != nil || len(ps) == 0 {
+		return
+	}
+	name := profileArg
+	if name == "" {
+		name, _ = remoteDefaultProfile(host) // "" on error: fall back to all
+	}
+	var mine []proposal
+	for _, p := range ps {
+		if name == "" || p.profile == name {
+			mine = append(mine, p)
+		}
+	}
+	if len(mine) == 0 {
+		return
+	}
+	say("%d proposal(s) pending for '%s':", len(mine), name)
+	for _, p := range mine {
+		say("  %s", p.id)
+	}
+	if !isTTY() {
+		say("summoning with the current profile — review: daybox profile proposals")
+		return
+	}
+	fmt.Fprintf(os.Stderr, "review now? [y/N] — continuing in 5s: ")
+	// poll rather than read-with-deadline: Go leaves std fds in blocking
+	// mode (SetReadDeadline fails on a real tty), and a leaked blocked
+	// reader would steal the first line the user types into the box's
+	// shell after the summon. Polling consumes nothing on timeout.
+	if !stdinReadable(5 * time.Second) {
+		fmt.Fprintln(os.Stderr)
+		say("continuing — review later: daybox profile proposals")
+		return
+	}
+	in := bufio.NewReader(os.Stdin)
+	line, err := in.ReadString('\n')
+	if err != nil {
+		fmt.Fprintln(os.Stderr)
+		say("continuing — review later: daybox profile proposals")
+		return
+	}
+	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "y") {
+		reviewProposals(host, mine, in)
+	}
+}
+
+// stdinReadable reports whether a line is waiting on stdin within d.
+func stdinReadable(d time.Duration) bool {
+	fds := []unix.PollFd{{Fd: int32(os.Stdin.Fd()), Events: unix.POLLIN}}
+	for deadline := time.Now().Add(d); ; {
+		left := time.Until(deadline)
+		if left < 0 {
+			return false
+		}
+		n, err := unix.Poll(fds, int(left.Milliseconds()))
+		if err == unix.EINTR {
+			continue
+		}
+		return err == nil && n > 0
+	}
+}
+
+// reviewProposals walks pending proposals one by one: diff, then
+// accept / reject / skip. Accepted ones replace the live profile NOW —
+// before the caller renders — so they apply to the box being summoned.
+func reviewProposals(host string, ps []proposal, in *bufio.Reader) {
+	for _, p := range ps {
+		cur, err := fetchProfile(host, p.profile)
+		if err != nil {
+			say("%s: %v — skipping", p.id, err)
+			continue
+		}
+		prop, err := sshCapture(host, "cat "+remoteProposalPath(p))
+		if err != nil {
+			say("%s: unreadable — skipping", p.id)
+			continue
+		}
+		if prop == cur {
+			say("%s matches the live profile — dropping it", p.id)
+			rmProposal(host, p)
+			continue
+		}
+		fmt.Printf("%s → profile '%s'\n", p.id, p.profile)
+		if err := validateProfile(prop); err != nil {
+			say("NOT a valid profile (%v)", err)
+			if strings.HasPrefix(strings.ToLower(prompt(in, "reject it?", "y")), "y") {
+				rmProposal(host, p)
+				say("rejected %s", p.id)
+			}
+			continue
+		}
+		fmt.Print(renderProposalDiff(cur, prop))
+		switch strings.ToLower(prompt(in, "[a]ccept / [r]eject / [s]kip", "s")) {
+		case "a", "accept":
+			ts := time.Now().Format("20060102-150405")
+			if err := pushProfile(host, p.profile, prop, ts); err != nil {
+				log.Fatal(err)
+			}
+			rmProposal(host, p)
+			say("accepted %s (backup: profile.toml.bak.%s) — applies to this summon", p.id, ts)
+		case "r", "reject":
+			rmProposal(host, p)
+			say("rejected %s", p.id)
+		default:
+			say("skipped %s — it stays pending", p.id)
+		}
+	}
+}
+
+func isTTY() bool { return term.IsTerminal(int(os.Stdin.Fd())) }

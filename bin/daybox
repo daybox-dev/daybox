@@ -688,6 +688,16 @@ cmd_up() {
         return 0
     fi
 
+    # Box-proposed profile changes surface BEFORE render — the only moment
+    # a profile edit can still affect the box about to be summoned. The
+    # plane never prompts (this path runs over a non-interactive ssh from
+    # the laptop, and approval is a laptop-side action by design); the
+    # laptop's own `daybox up` offers the interactive review before
+    # delegating here.
+    local pending
+    pending=$(ls "$PROFILE_CONF"/proposals/*.toml 2>/dev/null | wc -l | tr -d ' ')
+    [ "${pending:-0}" -gt 0 ] && log "NOTE: $pending pending proposal(s) for '$PROFILE' — summoning with the CURRENT profile (review on your laptop: daybox profile proposals)"
+
     vid=$(volume_id)
     # a volume can only attach to one server; make sure it is free
     local attached

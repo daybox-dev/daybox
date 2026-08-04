@@ -180,6 +180,16 @@ func cmdDelegate(verb string) { delegate(remoteDaybox+" "+verb, false) }
 // verb, so the laptop just forwards it — a profile is a whole daybox
 // (README: Profiles).
 func takeProfile(args []string) (string, []string) {
+	prof, rest := takeProfileName(args)
+	if prof == "" {
+		return "", rest
+	}
+	return " -p " + shq(prof), rest
+}
+
+// takeProfileName is takeProfile without the remote quoting — for laptop
+// verbs that need the plain profile name itself.
+func takeProfileName(args []string) (string, []string) {
 	prof := ""
 	rest := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
@@ -198,10 +208,7 @@ func takeProfile(args []string) (string, []string) {
 			rest = append(rest, a)
 		}
 	}
-	if prof == "" {
-		return "", rest
-	}
-	return " -p " + shq(prof), rest
+	return prof, rest
 }
 
 // cmdDelegateP delegates a no-arg verb, forwarding a -p profile selection.
@@ -252,11 +259,22 @@ func cmdProfile(args []string) {
 // ingress lockdown the box's public :22 is dark to everyone else, so a
 // direct connect only ever worked in the pre-ufw window of a fresh boot.
 func cmdUp(args []string) {
-	prof, rest := takeProfile(args)
+	name, rest := takeProfileName(args)
+	prof := ""
+	if name != "" {
+		prof = " -p " + shq(name)
+	}
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	detach := fs.Bool("detach", false, "summon but don't connect")
 	fs.Parse(rest)
 	host := mustControl()
+
+	// pending proposals get one last look BEFORE the summon: the profile
+	// is frozen into user_data at render time on the plane, so this is
+	// the only moment an accepted change can still reach the box about
+	// to boot. Non-blocking — a timeout or 'n' summons with the profile
+	// as it stands.
+	maybeOfferProposalReview(host, name)
 
 	cmd := remoteDaybox + prof + " up"
 	if fs.NArg() > 0 {
