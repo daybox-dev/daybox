@@ -437,7 +437,8 @@ remote/             tmux.conf + devbox-tmux + agent unit installed on boxes
 keys/               fallback pubkey dir (deployments use ~/.config/daybox/keys/)
 systemd/            idle-reaper service + timer (user units, %h-relative)
 install.sh          role-aware installer (mac | linux)
-scripts/release.sh  cross-compile + checksum release artifacts (local, never CI)
+scripts/cut.sh      build release artifacts: cross-compile + checksum (offline half)
+scripts/release.sh  sign + publish to R2 + verify the live release (never CI)
 README.md           this file — everything a user needs
 SECURITY.md         threat model, what's defended, what isn't, and why
 ```
