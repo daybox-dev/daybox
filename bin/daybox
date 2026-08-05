@@ -264,7 +264,7 @@ render_user_data() { # $1 = volume id — expand includes + placeholders
     local rendered
     rendered=$(awk -v repo="$REPO_DIR" \
         -v sshkeys="$PROFILE_STATE/authkeys.snippet" \
-        -v seed="$(SEED_FILE_FOR "$PROFILE")" -v sq="'\''" '
+        -v seed="$(SEED_FILE_FOR "$PROFILE")" -v sq="'" '
         # include a file, indent kept. Full-line comments are dropped (the
         # authored copies keep them; the box does not need them) because
         # user_data has a hard 32KB API cap and comments were >⅓ of it.
@@ -699,7 +699,10 @@ cmd_up() {
     # laptop's own `daybox up` offers the interactive review before
     # delegating here.
     local pending
-    pending=$(ls "$PROFILE_CONF"/proposals/*.toml 2>/dev/null | wc -l | tr -d ' ')
+    # an empty store is the steady state (proposals/ appears only when the
+    # relay stages the first one) — without || true, pipefail turns the
+    # unmatched glob into a silent errexit death before the summon
+    pending=$(ls "$PROFILE_CONF"/proposals/*.toml 2>/dev/null | wc -l | tr -d ' ' || true)
     [ "${pending:-0}" -gt 0 ] && log "NOTE: $pending pending proposal(s) for '$PROFILE' — summoning with the CURRENT profile (review on your laptop: daybox profile proposals)"
 
     vid=$(volume_id)
