@@ -97,6 +97,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		cmdDelegate("net")
 	case "reap":
 		cmdReap(rest)
+	case "setup":
+		cmdSetup(rest)
 	case "profile":
 		cmdProfile(rest)
 	case "join":

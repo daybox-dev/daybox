@@ -217,15 +217,13 @@ func cmdDelegateP(verb string, args []string) {
 	delegate(remoteDaybox+prof+" "+verb, false)
 }
 
-// cmdProfile forwards the `profile` command group (add|ls|use|rename|rm|seed)
-// straight to the control plane, quoting each token — except `edit`, which
-// runs $EDITOR here on the laptop (profilecmd.go): the plane stores the
-// seed, the laptop authors it.
+// cmdProfile routes the `profile` group. The laptop-authority subverbs
+// (profilecmd.go, proposalcmd.go — edit/proposals/accept/reject/propose)
+// NEVER delegate — approval is a laptop-side action by design (§1e). The
+// box/volume lifecycle subverbs (add/ls/use/rename/rm/seed) run on the
+// plane when amPlane, else delegate.
 func cmdProfile(args []string) {
 	if len(args) > 0 {
-		// the laptop-authority subverbs (profilecmd.go, proposalcmd.go):
-		// editing and proposal review never delegate — approval is a
-		// laptop-side action by design (§1e).
 		switch args[0] {
 		case "edit":
 			cmdProfileEdit(args[1:])
@@ -240,17 +238,99 @@ func cmdProfile(args []string) {
 			cmdProfileReject(args[1:])
 			return
 		case "propose":
-			// box-side: reads the local seed, talks to the relay — the
-			// only profile subverb that runs on a summoned box
 			cmdProfilePropose(args[1:])
 			return
 		}
+	}
+	if amPlane() {
+		cmdProfilePlane(args)
+		return
 	}
 	cmd := remoteDaybox + " profile"
 	for _, a := range args {
 		cmd += " " + shq(a)
 	}
 	delegate(cmd, false)
+}
+
+// cmdProfilePlane runs the box/volume lifecycle subverbs locally on the
+// plane (add/ls/use/rename/rm/seed). Unknown subverb -> usage.
+func cmdProfilePlane(args []string) {
+	dep := loadDeployment()
+	sub := "ls"
+	rest := []string{}
+	if len(args) > 0 {
+		sub = args[0]
+		rest = args[1:]
+	}
+	name, rest := takeProfileName(rest)
+	switch sub {
+	case "add":
+		stype := ""
+		if len(rest) > 0 {
+			stype = rest[0]
+		}
+		if name == "" && len(rest) > 0 {
+			name = rest[0]
+		}
+		if name == "" {
+			log.Fatal("usage: daybox profile add <name> [server-type]")
+		}
+		if err := profileAdd(dep, name, stype); err != nil {
+			log.Fatal(err)
+	}
+	case "ls", "list", "":
+		profileLs(dep, os.Stdout)
+	case "use":
+		if name == "" && len(rest) > 0 {
+			name = rest[0]
+		}
+		if name == "" {
+			log.Fatal("usage: daybox profile use <name>")
+		}
+		if err := profileUse(dep, name); err != nil {
+			log.Fatal(err)
+		}
+	case "rename", "mv":
+		new := ""
+		if len(rest) > 0 {
+			new = rest[0]
+		}
+		if name == "" || new == "" {
+			log.Fatal("usage: daybox profile rename <old> <new>")
+		}
+		if err := profileRename(dep, name, new); err != nil {
+			log.Fatal(err)
+		}
+	case "rm", "remove":
+		purge := ""
+		if len(rest) > 0 {
+			purge = rest[0]
+		}
+		if name == "" && len(rest) > 0 {
+			name = rest[0]
+		}
+		if name == "" {
+			log.Fatal("usage: daybox profile rm <name> [--purge]")
+		}
+		if err := profileRm(dep, name, purge); err != nil {
+			log.Fatal(err)
+		}
+	case "seed":
+		s := "show"
+		n := name
+		if len(rest) > 0 {
+			s = rest[0]
+		}
+		if len(rest) > 1 {
+			n = rest[1]
+		}
+		if err := profileSeed(dep, s, n, os.Stdout); err != nil {
+			log.Fatal(err)
+		}
+	default:
+		log.Fatalf("unknown: profile %s  (add|ls|use|rename|rm|seed)", sub)
+	}
 }
 
 // cmdUp: summon the big box, then ssh in — a fresh shell, any terminal.
@@ -358,6 +438,19 @@ func cmdSSH(args []string) {
 func cmdAttach(args []string) {
 	prof, _ := takeProfile(args)
 	delegate(remoteDaybox+prof+" attach", true)
+}
+
+// cmdSetup: one-time bootstrap of the current profile (register keys,
+// seed profile.toml, create the volume). Plane-only; the laptop delegates.
+func cmdSetup(args []string) {
+	if amPlane() {
+		if err := setup(loadDeployment()); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	prof, _ := takeProfile(args)
+	delegate(remoteDaybox+prof+" setup", false)
 }
 
 // cmdStatus: the whole deployment in one command. Role-gated: the plane

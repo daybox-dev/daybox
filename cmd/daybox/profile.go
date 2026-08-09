@@ -270,10 +270,12 @@ func validateIdentity(littleboxIP, remoteUser string) error {
 	return nil
 }
 
-// loadProvider constructs the named provider for this deployment, wiring
-// its token + per-provider state dir. bash: load_provider. An unknown
-// provider name is a config error, not a silent skip.
-func (d *deployment) loadProvider(name string) (Provider, error) {
+// providerFactory is the real provider constructor; tests override it to
+// inject a fake so the profile/reap/down verbs are exercised without a
+// cloud. The real factory builds a hetznerProvider from the token file.
+var providerFactory = realProviderFactory
+
+func realProviderFactory(d *deployment, name string) (Provider, error) {
 	if !validProfileName(name) {
 		return nil, fmt.Errorf("invalid provider name '%s'", name)
 	}
@@ -283,6 +285,13 @@ func (d *deployment) loadProvider(name string) (Provider, error) {
 	default:
 		return nil, fmt.Errorf("unknown provider '%s' — expected hetzner", name)
 	}
+}
+
+// loadProvider constructs the named provider for this deployment, wiring
+// its token + per-provider state dir. bash: load_provider. An unknown
+// provider name is a config error, not a silent skip.
+func (d *deployment) loadProvider(name string) (Provider, error) {
+	return providerFactory(d, name)
 }
 
 // deployment-wide defaults (bash: the `: "${VAR:=default}` block).

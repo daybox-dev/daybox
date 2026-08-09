@@ -1,0 +1,91 @@
+# daybox profile seed — what a box for this profile CARRIES.
+# Lives on the control plane at ~/.config/daybox/profiles/<name>/profile.toml,
+# applied on every boot; the next `daybox up` picks up edits.
+#
+# daybox ships only substrate (volume mount, git identity/key, tmux, ingress
+# lockdown). Everything else on your box is declared here, in a file you own —
+# anything you didn't put here is a bug. Nothing fails quietly: a failing step
+# fails the summon loudly and `daybox up` refuses to attach.
+
+# ---------------------------------------------------------------- packages --
+# Installed with apt on every boot (the root disk is rebuilt each summon).
+# apt is a signed, verified channel — the one install path daybox vouches for.
+packages = [
+  "ripgrep",
+  "jq",
+  "unzip",
+  "htop",
+  "build-essential",
+]
+
+# ------------------------------------------------------------------- repos --
+# Cloned into /work/repos on first boot, skipped if already there. Uses the
+# volume's own git key (see README: the box commits as you, with a scoped key).
+# repos = ["git@github.com:you/yourthing.git"]
+
+# ----------------------------------------------------------------- persist --
+# "path in your home" = "path under /work/state"
+#
+# The volume is the box's memory. Anything mapped here is symlinked onto it and
+# survives every reap; anything else lives on the root disk and is gone at the
+# next summon. This is how a tool's auth and state stay warm across boxes.
+#
+# A trailing slash declares a directory: it is created on the volume up front,
+# so tools can mkdir/write into it on a brand-new workspace. No slash means a
+# file: the link dangles until the tool first writes it.
+#
+# [persist]
+# ".claude/"             = "claude"         # Claude Code auth + sessions
+# ".claude.json"         = "claude.json"
+# ".local/share/claude/" = "claude-share"   # the installed versions
+# ".config/gh/"          = "gh"             # gh auth
+
+# ------------------------------------------------------------------- setup --
+# Arbitrary commands, run as your login user. daybox does NOT vouch for these:
+# they run verbatim, so a line that pipes an installer into a shell is your
+# informed choice, recorded in a file you own.
+#
+# once: run once PER VOLUME, tracked on the volume. For things that install
+# into /work and therefore survive a reap — installing them again on every
+# boot would be a pointless download and a repeated supply-chain exposure.
+# Edit the command text and it runs again, because the declaration changed.
+#
+# every_boot: run on EVERY boot. For things that land on the ephemeral root
+# disk and would otherwise be missing after a reap. Watch for tools that
+# split across both disks: Claude Code's versions persist under [persist],
+# but its ~/.local/bin launcher lives on the root disk, so a reap strands
+# the versions with nothing on PATH — re-run the persisted binary's own
+# installer each boot (no download; it links the launcher + shell setup):
+#
+# once = ["curl -fsSL https://claude.ai/install.sh | bash"]
+# every_boot = ['v=$(ls ~/.local/share/claude/versions | sort -V | tail -1) && "$HOME/.local/share/claude/versions/$v" install']
+[setup]
+# The one shipped default: bootstrap mise, the materializer for [tools]
+# below. Pinned release, sha256-verified before it touches the disk, landed
+# on the volume so it survives reaps. Delete together with [tools] if unwanted.
+once = ["""set -euo pipefail
+v=v2026.7.14
+case "$(uname -m)" in
+x86_64) a=x64 s=7a64615d0a594ac33a15632b0977e0a5b52a97d5d44691c63cb48397958163cf;;
+aarch64) a=arm64 s=c89a2aecf06566ea10bf3c90075588a2c69d07a1d7af428f9a111d910fd1d8b7;;
+*) echo "no pinned mise build for $(uname -m)" >&2; exit 1;;
+esac
+cd "$(mktemp -d)"
+curl -fsSLO "https://github.com/jdx/mise/releases/download/$v/mise-$v-linux-$a.tar.gz"
+echo "$s  mise-$v-linux-$a.tar.gz" | sha256sum -c -
+tar -xzf "mise-$v-linux-$a.tar.gz" && install -D -m 755 mise/bin/mise /work/state/bin/mise"""]
+
+# ------------------------------------------------------------------- tools --
+# Exact tool pins, materialized by mise onto the volume: payloads survive
+# reaps, nothing re-downloads at boot, a new volume comes up identical. One
+# syntax per ecosystem: "node", "npm:<pkg>", "cargo:<crate>", "ubi:<owner/repo>".
+# Checksum-verified where the backend provides it, frozen in a lockfile.
+# Delete this block (and the bootstrap above): no [tools] = no mise at all.
+[tools]
+# node = "24.18.0"
+# "npm:@anthropic-ai/claude-code" = "2.1.220"
+
+[tools.settings]
+# hardening defaults — yours to delete like everything else here
+locked = true                # reinstalls must match the lockfile's checksums
+minimum_release_age = "3d"   # npm: ignore releases <3 days old, transitive too
