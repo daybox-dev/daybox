@@ -4,7 +4,7 @@
 # profile ('conform'), walks the whole lifecycle, and tears everything down —
 # box, net node, volume. Cost is a few cents (one cheap box for ~minutes plus
 # a pro-rated volume). Run it on a control plane before trusting any new
-# providers/<name>.sh; select the provider under test the normal way
+# provider implementation; select the provider under test the normal way
 # (PROVIDER in config.local, or in the conform profile's config).
 #
 #   scripts/test-provider-conformance.sh --i-know-this-costs-money [server-type]
@@ -20,7 +20,10 @@
 set -uo pipefail
 
 REPO_DIR=$(cd "$(dirname "$0")/.." && pwd)
-DAYBOX="$REPO_DIR/bin/daybox"
+# the single Go binary: a freshly built dist copy, else the installed plane CLI.
+DAYBOX="$REPO_DIR/dist/daybox-linux-amd64"
+[ -x "$DAYBOX" ] || DAYBOX="$HOME/.local/bin/daybox"
+[ -x "$DAYBOX" ] || { echo "no daybox binary: build cmd/daybox/build.sh or install it" >&2; exit 2; }
 PROFILE=conform
 TYPE=${2:-cpx11}
 

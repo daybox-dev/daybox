@@ -157,19 +157,26 @@ cp "$DIST/$BIN-linux-amd64" "$DIST/$BIN-agent-linux-amd64"
 echo "  control-plane payload -> dist/$BIN-controlplane.tar.gz"
 PAYDIR="$DIST/.payload"
 rm -rf "$PAYDIR"; mkdir -p "$PAYDIR/dist"
-for p in bin remote systemd cloud-init headscale keys providers \
+# One binary now — the bash bin/daybox + providers/*.sh are retired; the Go
+# CLI runs on the plane as well as the laptop. The payload carries the
+# runtime files the binary dereferences from $REPO_DIR (cloud-init template,
+# remote/ box-provisioning files, keys/ fallback) + the binary itself.
+for p in remote systemd cloud-init headscale keys \
          profile.default.toml install.sh README.md SECURITY.md LICENSE; do
     [ -e "$ROOT/$p" ] && cp -R "$ROOT/$p" "$PAYDIR/"
 done
-cp "$DIST/$BIN-agent-linux-amd64" "$PAYDIR/dist/$BIN-agent-linux-amd64"
-# The payload must carry every $REPO_DIR path bin/daybox dereferences at
+# the single Go binary: the plane's daybox AND the daybox-agent (same binary)
+cp "$DIST/$BIN-linux-amd64"            "$PAYDIR/dist/$BIN-linux-amd64"
+cp "$DIST/$BIN-linux-amd64"            "$PAYDIR/dist/$BIN-agent-linux-amd64"
+# The payload must carry every $REPO_DIR path the binary dereferences at
 # runtime. A gap here is invisible to dev-checkout inits (pushTree ships the
 # whole clone) and surfaces only on a fresh machine running a release —
 # v0.2.4 shipped without providers/ and every standalone init died at
 # `daybox setup` with "unknown provider 'hetzner'". Fail the build instead.
-for req in bin/daybox remote/controlplane-setup.sh install.sh \
-           providers/hetzner.sh profile.default.toml \
-           cloud-init/cloud-init.yaml.template "dist/$BIN-agent-linux-amd64"; do
+for req in remote/controlplane-setup.sh install.sh \
+           profile.default.toml \
+           cloud-init/cloud-init.yaml.template \
+           "dist/$BIN-linux-amd64" "dist/$BIN-agent-linux-amd64"; do
     [ -e "$PAYDIR/$req" ] || {
         echo "refusing to package an incomplete control-plane payload: missing $req" >&2
         exit 1

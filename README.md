@@ -384,18 +384,16 @@ is writing one new file that implements the contract, selected with
 `PROVIDER=<name>` in `config.local` or a profile's config (default:
 `hetzner`, the reference implementation).
 
-The full contract — each function's arguments, stdin/stdout, failure
-behavior, and the exact environment a provider file may assume (it is
-re-sourced per profile, so the reaper's loop probes every profile through
+The full contract — each method's arguments, return values, failure
+behavior, and the exact environment a provider runs in (a provider is
+constructed per profile, so the reaper's loop probes every profile through
 *its* provider; anything a provider persists is namespaced under
 `state/providers/<name>/`) — is documented at the top of
-[`providers/hetzner.sh`](providers/hetzner.sh). Two suites keep a provider
-honest: `scripts/test-provider-select.sh` (free, stubs) proves the right
-file is loaded per profile and one profile's choice never leaks into the
-next, and `scripts/test-provider-conformance.sh` (a few cents of real cloud
-spend) walks the full lifecycle — summon → mount → net join → reap → zero
-ghosts → volume purge — on a throwaway profile. Run the conformance suite
-before trusting any new provider file.
+[`cmd/daybox/provider.go`](cmd/daybox/provider.go) (the `Provider` interface).
+`scripts/test-provider-conformance.sh` (a few cents of real cloud spend)
+walks the full lifecycle — summon → mount → net join → reap → zero ghosts →
+volume purge — on a throwaway profile. Run it before trusting any new
+provider implementation.
 
 AWS-with-spot is the intended second implementation: state lives on the
 volume and the reaper already treats a vanished box as survivable, so spot
@@ -448,12 +446,16 @@ can change whose deployment a machine is; that lives in each machine's
 ## Layout
 
 ```
-cmd/daybox/         the Go CLI + daybox-agent net node (tsnet; ./build.sh)
-bin/daybox          control-plane CLI (summon/reap/status/net; curl+jq only)
-providers/          the provider contract + implementations (hetzner.sh)
+cmd/daybox/         the Go CLI — runs on BOTH the laptop and the plane
+                    (laptop delegates over ssh; plane does the cloud work).
+                    Role-gated by the Hetzner token (plane) vs CONTROL_HOST
+                    (laptop). Same binary is the daybox-agent net node.
+                    The cloud provider contract is a Go interface
+                    (hetznerProvider); a new cloud is a new Provider impl.
 headscale/          coordination-server config template (config.template.yaml)
 cloud-init/         big-box provisioning template — SUBSTRATE ONLY
-profile.default.toml  the seed template a new profile starts from
+profile.default.toml  the seed template a new profile starts from (embedded
+                    into the binary via go:embed)
 remote/apply-seed.py  applies a profile's seed on the box
 remote/             tmux.conf + devbox-tmux + agent unit installed on boxes
 keys/               fallback pubkey dir (deployments use ~/.config/daybox/keys/)

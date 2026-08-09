@@ -42,8 +42,22 @@ Darwin)
     echo "  - ~/bin must be on PATH"
     ;;
 Linux)
-    echo "[install] control-plane role: daybox CLI + reaper timer"
-    link "$REPO/bin/daybox"         "$HOME/.local/bin/daybox"
+    echo "[install] control-plane role: daybox CLI (single Go binary) + reaper timer"
+    # One binary now — the Go CLI runs on the plane as well as the laptop
+    # (the bash bin/daybox is retired). It reads the cloud-init template +
+    # remote/ box-provisioning files from this checkout at runtime, so the
+    # repo tree stays; only the entry-point binary changes.
+    BIN="$REPO/dist/daybox-linux-amd64"
+    if [ ! -f "$BIN" ]; then
+        # a repo checked out on the plane (init pushTree) has no dist/; the
+        # signed upgrade path installs the binary there. For a from-source
+        # install, build it first: cmd/daybox/build.sh.
+        echo "  no binary at $BIN — build it first: cmd/daybox/build.sh" >&2
+        exit 1
+    fi
+    mkdir -p "$HOME/.local/bin"
+    backup "$HOME/.local/bin/daybox"
+    install -m 755 "$BIN" "$HOME/.local/bin/daybox"
     link "$REPO/remote/devbox-tmux" "$HOME/.local/bin/devbox-tmux"
     link "$REPO/remote/tmux.conf"   "$HOME/.tmux.conf"
     mkdir -p "$HOME/.config/daybox/state"
