@@ -253,55 +253,87 @@ func cmdProfile(args []string) {
 	delegate(cmd, false)
 }
 
-// cmdUp: summon via the control plane, then ssh in — a fresh shell, any
-// terminal. tmux is opt-in via `daybox attach`.
-// The shell hops via the control plane like `ssh`/`attach` do: under
-// ingress lockdown the box's public :22 is dark to everyone else, so a
-// direct connect only ever worked in the pre-ufw window of a fresh boot.
+// cmdUp: summon the big box, then ssh in — a fresh shell, any terminal.
+// tmux is opt-in via `daybox attach`.
+//
+// Two roles, one binary (the unify-single-binary port): on the LAPTOP it
+// delegates `up` to the control plane over ssh (the Hetzner token never
+// leaves the plane); on the PLANE it does the summon locally via summonUp.
+// Under ingress lockdown the box's public :22 is dark to everyone but the
+// plane, so the laptop's follow-up shell also hops via the plane (delegate).
+//
+// Bug #3: the plane no longer prints `IP`/`HOSTKEY` to stdout. The laptop
+// relies on the plane's exit code (0 = success) + the IP the plane says on
+// stderr (the user sees it either way); no stdout contract to parse.
 func cmdUp(args []string) {
 	name, rest := takeProfileName(args)
+	fs := flag.NewFlagSet("up", flag.ExitOnError)
+	detach := fs.Bool("detach", false, "summon but don't connect")
+	fs.Parse(rest)
+	serverType := ""
+	if fs.NArg() > 0 {
+		serverType = fs.Arg(0)
+	}
+
+	// PLANE role: do the summon here. No stdout IP/HOSTKEY contract (bug #3).
+	if amPlane() {
+		dep := loadDeployment()
+		p, err := dep.deriveProfile(profileNameOrCurrent(dep, name))
+		if err != nil {
+			log.Fatal(err)
+		}
+		if serverType != "" {
+			p.serverType = serverType
+		}
+		prov, err := dep.loadProvider(p.provider)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := prov.CheckCredentials(); err != nil {
+			log.Fatal(err)
+		}
+		if err := summonUp(p, prov, *detach, newPlaneSshOps(p)); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+
+	// LAPTOP role: delegate to the plane. The profile is frozen into
+	// user_data at render time on the plane, so pending proposals get one
+	// last non-blocking look here before the summon.
+	host := mustControl()
+	maybeOfferProposalReview(host, name)
 	prof := ""
 	if name != "" {
 		prof = " -p " + shq(name)
 	}
-	fs := flag.NewFlagSet("up", flag.ExitOnError)
-	detach := fs.Bool("detach", false, "summon but don't connect")
-	fs.Parse(rest)
-	host := mustControl()
-
-	// pending proposals get one last look BEFORE the summon: the profile
-	// is frozen into user_data at render time on the plane, so this is
-	// the only moment an accepted change can still reach the box about
-	// to boot. Non-blocking — a timeout or 'n' summons with the profile
-	// as it stands.
-	maybeOfferProposalReview(host, name)
-
 	cmd := remoteDaybox + prof + " up"
-	if fs.NArg() > 0 {
-		cmd += " " + shq(fs.Arg(0)) // server type override
+	if *detach {
+		cmd += " --detach"
+	}
+	if serverType != "" {
+		cmd += " " + shq(serverType)
 	}
 	say("summoning via %s (fresh boot takes ~60-90s)…", host)
-	out, err := sshCapture(host, cmd)
-	if err != nil {
-		log.Fatal("summon failed (control plane output above)")
-	}
-
-	var ip string
-	for _, line := range strings.Split(out, "\n") {
-		if strings.HasPrefix(line, "IP ") {
-			ip = strings.TrimSpace(strings.TrimPrefix(line, "IP "))
-		}
-	}
-	if ip == "" {
-		log.Fatalf("could not parse the control plane's answer:\n%s", out)
-	}
-
+	// delegate runs the remote cmd with a pty; the plane's `up` ssh'es
+	// in itself when not --detach (bug #3: the plane owns the follow-up
+	// shell). delegate exits with the remote's code on failure.
+	// the plane ssh'd in already (bug #3: the plane owns the follow-up
+	// shell when not --detach); --detach just reports. Non-detach delegates
+	// (interactive pty).
 	if *detach {
-		say("box is up at %s — connect with: daybox ssh   (tmux: daybox attach)", ip)
+		delegate(cmd, false) // non-tty: the plane just reports
+		say("box is up — connect with: daybox ssh   (tmux: daybox attach)")
 		return
 	}
-	// the follow-up shell must target the SAME profile's box
-	delegate(remoteDaybox+prof+" ssh", true)
+	delegate(cmd, true) // tty: the plane ssh'es in interactively
+}
+
+// profileNameOrCurrent resolves the -p flag to a profile name, falling back
+// to the current_profile file, then 'default'. Returns the resolved name.
+func profileNameOrCurrent(dep *deployment, explicit string) string {
+	name, _ := dep.currentProfile(explicit)
+	return name
 }
 
 // shq single-quotes s for a remote POSIX shell.
