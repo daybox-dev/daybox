@@ -95,6 +95,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		cmdDown(rest)
 	case "net": // deprecated spelling — folded into status; kept for muscle memory
 		cmdDelegate("net")
+	case "reap":
+		cmdReap(rest)
 	case "profile":
 		cmdProfile(rest)
 	case "join":

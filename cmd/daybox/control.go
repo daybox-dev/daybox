@@ -360,6 +360,17 @@ func cmdAttach(args []string) {
 	delegate(remoteDaybox+prof+" attach", true)
 }
 
+// cmdReap: idle-reaper entry (run by the systemd timer every 5min on the
+// plane). The plane loops every profile + reapOne; the laptop delegates.
+func cmdReap(args []string) {
+	if amPlane() {
+		reapRun(loadDeployment())
+		return
+	}
+	prof, _ := takeProfile(args)
+	delegate(remoteDaybox+prof+" reap", false)
+}
+
 // cmdDown: delete the box now (billing stops). Role-gated like up: the plane
 // detaches the volume + reaps + drops the net node; the laptop delegates
 // (the Hetzner token lives on the plane).
