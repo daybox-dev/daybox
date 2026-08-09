@@ -90,7 +90,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "attach":
 		cmdAttach(rest)
 	case "status":
-		cmdDelegateP("status", rest)
+		cmdStatus(rest)
 	case "down":
 		cmdDown(rest)
 	case "net": // deprecated spelling — folded into status; kept for muscle memory

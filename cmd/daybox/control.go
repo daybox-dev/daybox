@@ -360,6 +360,26 @@ func cmdAttach(args []string) {
 	delegate(remoteDaybox+prof+" attach", true)
 }
 
+// cmdStatus: the whole deployment in one command. Role-gated: the plane
+// prints every profile's box + the net table; the laptop delegates.
+func cmdStatus(args []string) {
+	name, _ := takeProfileName(args)
+	if amPlane() {
+		dep := loadDeployment()
+		explicit := ""
+		if name != "" {
+			explicit = name
+		}
+		statusRun(dep, os.Stdout, explicit)
+		return
+	}
+	prof := ""
+	if name != "" {
+		prof = " -p " + shq(name)
+	}
+	delegate(remoteDaybox+prof+" status", false)
+}
+
 // cmdReap: idle-reaper entry (run by the systemd timer every 5min on the
 // plane). The plane loops every profile + reapOne; the laptop delegates.
 func cmdReap(args []string) {
