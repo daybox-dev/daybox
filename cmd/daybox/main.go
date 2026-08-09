@@ -92,7 +92,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 	case "status":
 		cmdDelegateP("status", rest)
 	case "down":
-		cmdDelegateP("down", rest)
+		cmdDown(rest)
 	case "net": // deprecated spelling — folded into status; kept for muscle memory
 		cmdDelegate("net")
 	case "profile":

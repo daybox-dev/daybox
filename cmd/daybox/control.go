@@ -359,3 +359,30 @@ func cmdAttach(args []string) {
 	prof, _ := takeProfile(args)
 	delegate(remoteDaybox+prof+" attach", true)
 }
+
+// cmdDown: delete the box now (billing stops). Role-gated like up: the plane
+// detaches the volume + reaps + drops the net node; the laptop delegates
+// (the Hetzner token lives on the plane).
+func cmdDown(args []string) {
+	name, _ := takeProfileName(args)
+	if amPlane() {
+		dep := loadDeployment()
+		p, err := dep.deriveProfile(profileNameOrCurrent(dep, name))
+		if err != nil {
+			log.Fatal(err)
+		}
+		prov, err := dep.loadProvider(p.provider)
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := downBox(p, prov, newPlaneDownOps(p)); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	prof := ""
+	if name != "" {
+		prof = " -p " + shq(name)
+	}
+	delegate(remoteDaybox+prof+" down", false)
+}
