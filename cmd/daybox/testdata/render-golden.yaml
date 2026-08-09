@@ -1,0 +1,676 @@
+#cloud-config
+# daybox provisioning — rendered by `daybox up` (render_user_data in bin/daybox).
+#
+# This file is SUBSTRATE ONLY: what every daybox has, whatever it is for.
+# What a box CARRIES — packages, repos, tools, what persists on the volume —
+# is declared per profile in profile.toml and applied by apply-seed.py. If you
+# find yourself adding a tool here, it belongs in a profile instead.
+#
+# Placeholders are "at"-delimited tokens; they are NOT written literally in
+# this header because the renderer would expand them here too. The kinds
+# (spelled without their delimiters):
+#   REPO:path        replaced by <repo>/path's contents, indentation preserved,
+#                    so every summoned box inherits the repo's CURRENT files
+#   FILE:/abs/path   same, for a file outside the repo (control-plane local)
+#   SSH_KEYS         every pubkey in <repo>/keys/*.pub as YAML list items
+#   PROFILE_SEED     this profile's profile.toml, from the control plane
+#   VOLUME_ID        workspace volume's numeric id
+#   REMOTE_USER      login user, from config REMOTE_USER
+#   LITTLEBOX_IP     control plane's public IP — the only inbound source the
+#                    box's ingress firewall permits (the README)
+#
+# Preview the fully rendered result with: daybox render
+
+# Ingress is locked down from the FIRST moment of boot, not from the end of
+# provisioning. bootcmd runs early in every boot — before packages, before
+# runcmd, before any failure can strand the box — so there is no window where
+# public sshd faces the internet, and a firstboot that dies at any point
+# leaves a box that only the control plane can reach. ufw (installed by the
+# packages stage) takes over at the top of firstboot; enabling it replaces
+# these raw rules with the equivalent policy.
+bootcmd:
+  - [sh, -c, "iptables -w -P OUTPUT ACCEPT; iptables -w -F INPUT;
+      iptables -w -A INPUT -i lo -j ACCEPT;
+      iptables -w -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT;
+      iptables -w -A INPUT -p udp --dport 68 -j ACCEPT;
+      iptables -w -A INPUT -p tcp -s 203.0.113.10 --dport 22 -j ACCEPT;
+      iptables -w -P INPUT DROP"]
+  - [sh, -c, "ip6tables -w -P OUTPUT ACCEPT; ip6tables -w -F INPUT;
+      ip6tables -w -A INPUT -i lo -j ACCEPT;
+      ip6tables -w -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT;
+      ip6tables -w -A INPUT -p ipv6-icmp -j ACCEPT;
+      ip6tables -w -A INPUT -p udp --dport 546 -j ACCEPT;
+      ip6tables -w -P INPUT DROP"]
+
+ssh_pwauth: false
+
+users:
+  - name: dev
+    groups: sudo
+    shell: /bin/bash
+    sudo: ALL=(ALL) NOPASSWD:ALL
+    ssh_authorized_keys:
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIETK/JI88OZihytMTWNWbOmQhLPVXFEKtw4sLg5XTVMx laptop
+      - ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAItestkey2macbookairabcdef1234567890 mac
+
+package_update: true
+# Substrate only. tmux because `daybox attach` is built on it, ufw because it
+# is the ingress boundary, git because daybox's own machinery assumes it (the
+# volume git key, ~/.ssh/config, gitconfig, /work/repos). The base image
+# already provides curl and python3. Everything else is profile payload.
+packages:
+  - tmux
+  - git
+  - ufw
+
+write_files:
+  - path: /etc/ssh/sshd_config.d/50-keepalive.conf
+    content: |
+      ClientAliveInterval 15
+      ClientAliveCountMax 3
+  - path: /opt/daybox/tmux.conf
+    content: |
+      set-option -ga update-environment XDG_RUNTIME_DIR
+      
+      
+      set-option -g destroy-unattached off
+      set-option -g exit-empty off
+      
+      
+      set-option -g window-size latest
+      set-option -g aggressive-resize off
+      
+      set-option -g history-limit 50000
+  - path: /opt/daybox/devbox-tmux
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      
+      set -u
+      
+      SESSION="${DEVBOX_TMUX_SESSION:-main}"
+      CC_FLAG=""
+      [ "${1:-}" = "-CC" ] && CC_FLAG="-CC"
+      
+      PROBE_TIMEOUT="${DEVBOX_TMUX_PROBE_TIMEOUT:-4}"
+      
+      log() { printf '[devbox-tmux] %s\n' "$*" >&2; }
+      
+      probe() {
+          timeout "$PROBE_TIMEOUT" tmux "$@" </dev/null
+      }
+      
+      server_responsive() {
+          probe list-sessions >/dev/null 2>&1
+          local rc=$?
+          [ "$rc" -ne 124 ]
+      }
+      
+      server_running() {
+          if pgrep -u "$(id -u)" -x 'tmux: server' >/dev/null 2>&1; then
+              return 0
+          fi
+          [ -S "/tmp/tmux-$(id -u)/default" ]
+      }
+      
+      reap_orphan_clients() {
+          local pid ppid
+          for pid in $(pgrep -u "$(id -u)" -f 'tmux .*-CC attach' 2>/dev/null); do
+              [ "$pid" = "$$" ] && continue
+              ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d ' ')
+              if [ "$ppid" = "1" ]; then
+                  log "reaping orphaned control client $pid (parent died)"
+                  kill -9 "$pid" 2>/dev/null
+              fi
+          done
+      }
+      
+      reap_zombie_pty_holders() {
+          local self_chain=" $$ " p="$PPID"
+          while [ -n "$p" ] && [ "$p" -gt 1 ] 2>/dev/null; do
+              self_chain="${self_chain}${p} "
+              p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+          done
+          local servers=" $(pgrep -u "$(id -u)" -x 'tmux: server' 2>/dev/null | tr '\n' ' ') "
+      
+          local fdinfo fd pid idx
+          for fdinfo in /proc/[0-9]*/fdinfo/*; do
+              fd=${fdinfo/fdinfo/fd}
+              [ "$(readlink "$fd" 2>/dev/null)" = "/dev/ptmx" ] || continue
+              idx=$(awk '/^tty-index:/ {print $2}' "$fdinfo" 2>/dev/null)
+              [ -n "$idx" ] || continue
+              [ -z "$(ps -t "pts/$idx" -o pid= 2>/dev/null)" ] || continue
+              pid=${fdinfo#/proc/}; pid=${pid%%/*}
+              case "$servers" in *" $pid "*) continue ;; esac
+              case "$self_chain" in
+              *" $pid "*)
+                  log "NOTE: this session inherited the leaked master of dead pts/$idx (pid $pid); a reconnect will clear it"
+                  continue ;;
+              esac
+              case "$(tr '\0' ' ' </proc/"$pid"/cmdline 2>/dev/null)" in
+              *sshd*)
+                  log "killing $pid (holds leaked master of dead pts/$idx)"
+                  kill -9 "$pid" 2>/dev/null ;;
+              *)
+                  log "NOTE: pid $pid holds a master for silent pts/$idx; leaving it alone" ;;
+              esac
+          done
+      }
+      
+      recover_wedged_server() {
+          log "tmux server is not responding (wedged). Attempting recovery..."
+      
+          reap_orphan_clients
+          reap_zombie_pty_holders
+          sleep 2
+          if server_responsive; then
+              log "server recovered after reaping dead clients (no sessions lost)."
+              return 0
+          fi
+      
+          local spid0
+          spid0=$(pgrep -u "$(id -u)" -x 'tmux: server' | head -1)
+          if [ -n "$spid0" ]; then
+              log "sending SIGCONT+SIGUSR1 to server $spid0 (non-destructive)"
+              kill -CONT "$spid0" 2>/dev/null
+              kill -USR1 "$spid0" 2>/dev/null
+              sleep 1
+              if server_responsive; then
+                  log "server recovered via SIGUSR1 (no sessions lost)."
+                  return 0
+              fi
+          fi
+      
+          local tmpf clients
+          tmpf=$(mktemp) || { log "mktemp failed"; return 1; }
+          probe list-clients -F '#{client_pid}' >"$tmpf" 2>/dev/null
+          clients=$(tr '\n' ' ' <"$tmpf")
+          rm -f "$tmpf"
+          if [ -n "${clients// /}" ]; then
+              log "killing stale clients: $clients"
+              kill -9 $clients 2>/dev/null
+              sleep 1
+          fi
+      
+          if server_responsive; then
+              log "server recovered after clearing clients."
+              return 0
+          fi
+      
+          local cpids
+          cpids=$(pgrep -u "$(id -u)" -f 'tmux .*attach' 2>/dev/null)
+          if [ -n "$cpids" ]; then
+              log "force-killing lingering attach clients: $cpids"
+              kill -9 $cpids 2>/dev/null
+              sleep 1
+          fi
+      
+          if server_responsive; then
+              log "server recovered after killing attach clients."
+              return 0
+          fi
+      
+          log "WARNING: server still wedged; restarting it (running panes will be lost)."
+          local spid
+          spid=$(pgrep -u "$(id -u)" -x 'tmux: server' | head -1)
+          if [ -n "$spid" ]; then
+              kill -TERM "$spid" 2>/dev/null
+              sleep 1
+              kill -9 "$spid" 2>/dev/null
+              sleep 1
+          fi
+          local sock="/tmp/tmux-$(id -u)/default"
+          [ -S "$sock" ] && ! server_running && rm -f "$sock" 2>/dev/null
+      
+          server_running && return 1
+          return 0
+      }
+      
+      ensure_session() {
+          if ! probe has-session -t "$SESSION" 2>/dev/null; then
+              log "creating session '$SESSION'"
+              tmux new-session -d -s "$SESSION" 2>/dev/null
+          fi
+      }
+      
+      main() {
+          reap_orphan_clients
+          reap_zombie_pty_holders
+      
+          if server_running; then
+              if ! server_responsive; then
+                  if ! recover_wedged_server; then
+                      log "ERROR: could not recover tmux server."
+                      exit 1
+                  fi
+              fi
+          fi
+      
+          ensure_session
+      
+          if [ -n "$CC_FLAG" ]; then
+              exec tmux -CC attach -t "$SESSION"
+          else
+              exec tmux attach -t "$SESSION"
+          fi
+      }
+      
+      main "$@"
+  - path: /opt/daybox/apply-seed.py
+    permissions: '0755'
+    content: |
+      #!/usr/bin/env python3
+      """Apply a profile's seed to a freshly booted daybox.
+      
+      The box carries what its profile declares and nothing else. This reads that
+      declaration (profile.toml, pushed by the control plane) and applies it.
+      
+      Deliberately unforgiving: the first failing step aborts the run and the
+      outcome is written to a status file that `daybox up` reads. A box that comes
+      up missing what its profile declared is worse than no box, because it looks
+      fine. There is no partial success and no step that is allowed to fail.
+      
+      Python because Ubuntu 24.04 ships 3.12, whose stdlib has tomllib — so the one
+      place that parses TOML needs no dependency anywhere in the system.
+      """
+      
+      import hashlib
+      import os
+      import re
+      import subprocess
+      import sys
+      import tomllib
+      from pathlib import Path
+      
+      STATUS = Path("/var/lib/daybox/seed.status")
+      ONCE_DIR = Path("/work/state/.seed-once")
+      HOME_ROOT = Path("/home")
+      STATE = Path("/work/state")
+      REPOS = Path("/work/repos")
+      
+      
+      def status(text: str) -> None:
+          STATUS.parent.mkdir(parents=True, exist_ok=True)
+          STATUS.write_text(text)
+      
+      
+      def die(step: str, detail: str) -> None:
+          msg = f"FAILED: {step}\n{detail}"
+          print(msg, file=sys.stderr, flush=True)
+          status(msg)
+          sys.exit(1)
+      
+      
+      def run(step: str, argv, *, user: str | None = None, shell_cmd: str | None = None) -> None:
+          """Run a step, streaming output. Any non-zero exit aborts the whole seed."""
+          if shell_cmd is not None:
+              argv = ["sudo", "-u", user, "bash", "-lc", shell_cmd] if user else ["bash", "-lc", shell_cmd]
+          print(f"[seed] {step}", flush=True)
+          try:
+              p = subprocess.run(argv, capture_output=True, text=True)
+          except OSError as e:
+              die(step, str(e))
+          if p.stdout:
+              print(p.stdout, flush=True)
+          if p.returncode != 0:
+              die(step, f"exit {p.returncode}\n{p.stderr.strip()}")
+      
+      
+      def _safe_name(kind: str, value) -> str:
+          """A non-empty string that cannot be mistaken for a command-line flag.
+      
+          Package names go to apt-get as argv, so shell metacharacters are harmless
+          — but a leading dash would be parsed as an option, which is not.
+          """
+          if not isinstance(value, str) or not value.strip():
+              die(kind, "every entry must be a non-empty string")
+          if value.startswith("-"):
+              die(kind, f"{value!r} starts with '-' and would be read as a flag")
+          return value
+      
+      
+      def apply_packages(pkgs, _user):
+          if not pkgs:
+              return
+          for p in pkgs:
+              _safe_name("packages", p)
+          run(f"apt install: {' '.join(pkgs)}",
+              ["apt-get", "install", "-y", "-q",
+               "-o", "Dpkg::Options::=--force-confold", "--no-install-recommends", *pkgs])
+      
+      
+      def apply_repos(repos, user):
+          if not repos:
+              return
+          for url in repos:
+              _safe_name("repos", url)
+              name = url.rstrip("/").split("/")[-1]
+              if name.endswith(".git"):
+                  name = name[:-4]
+              if not name:
+                  die("repos", f"cannot derive a directory name from {url!r}")
+              dest = REPOS / name
+              if dest.exists():
+                  print(f"[seed] repo {name} already present — leaving it", flush=True)
+                  continue
+              run(f"clone {url}",
+                  ["sudo", "-u", user, "git", "clone", "--", url, str(dest)])
+      
+      
+      def _safe_rel(kind: str, value: str) -> str:
+          """Reject anything that would escape the directory it is anchored to."""
+          if not isinstance(value, str) or not value.strip():
+              die(kind, "every entry must be a non-empty string")
+          norm = os.path.normpath(value)
+          if os.path.isabs(norm) or norm == ".." or norm.startswith("../"):
+              die(kind, f"{value!r} must be a relative path that stays inside its root")
+          return norm
+      
+      
+      def apply_persist(mapping, user):
+          """Symlink paths in HOME onto the volume, so they survive a reap.
+      
+          This is what makes the volume "memory" for *any* tool, instead of only for
+          the ones cloud-init happened to hardcode. `~/.claude -> /work/state/claude`
+          is now a profile's declaration, not a product assumption.
+      
+          A trailing slash on either side declares a DIRECTORY mapping and the
+          volume-side target is created up front. Without it the mapping has file
+          semantics: the link dangles until the tool writes through it, which
+          open(2) permits. The distinction is load-bearing — mkdir(2) through a
+          dangling symlink fails EEXIST, so a directory target that nothing has
+          created yet breaks the very tool the mapping exists for (the Claude
+          installer's `mkdir -p ~/.claude` was the discovering case).
+          """
+          if not mapping:
+              return
+          if not isinstance(mapping, dict):
+              die("persist", "[persist] must be a table of \"home path\" = \"volume path\"")
+          home = HOME_ROOT / user
+          for rel, vol in mapping.items():
+              is_dir = rel.endswith("/") or vol.endswith("/")
+              link = home / _safe_rel("persist", rel.rstrip("/"))
+              target = STATE / _safe_rel("persist", vol.rstrip("/"))
+              if link.is_symlink():
+                  link.unlink()
+              elif link.exists():
+                  die("persist", f"{link} already exists and is not a symlink — "
+                                 f"refusing to replace real data")
+              if target.exists() and target.is_dir() != is_dir:
+                  kind = "a directory" if is_dir else "a file"
+                  die("persist", f"{target} exists but the mapping declares {kind} "
+                                 f"(trailing slash = directory) — refusing to guess")
+              link.parent.mkdir(parents=True, exist_ok=True)
+              if is_dir:
+                  target.mkdir(parents=True, exist_ok=True)
+              else:
+                  target.parent.mkdir(parents=True, exist_ok=True)
+              link.symlink_to(target)
+              run(f"persist {link} -> {target}",
+                  ["chown", "-h", f"{user}:{user}", str(link)])
+              run(f"own {target.parent}", ["chown", "-R", f"{user}:{user}", str(target.parent)])
+      
+      
+      def apply_once(cmds, user):
+          """Steps that install into /work and therefore survive a reap."""
+          if not cmds:
+              return
+          ONCE_DIR.mkdir(parents=True, exist_ok=True)
+          for cmd in cmds:
+              if not isinstance(cmd, str) or not cmd.strip():
+                  die("setup.once", "every entry must be a non-empty string")
+              marker = ONCE_DIR / hashlib.sha256(cmd.encode()).hexdigest()[:32]
+              if marker.exists():
+                  print(f"[seed] once (already applied to this volume): {cmd}", flush=True)
+                  continue
+              run(f"once: {cmd}", None, user=user, shell_cmd=cmd)
+              marker.write_text(cmd + "\n")
+      
+      
+      def apply_every_boot(cmds, user):
+          """Steps landing on the ephemeral root disk, so they must repeat."""
+          for cmd in cmds or []:
+              if not isinstance(cmd, str) or not cmd.strip():
+                  die("setup.every_boot", "every entry must be a non-empty string")
+              run(f"every_boot: {cmd}", None, user=user, shell_cmd=cmd)
+      
+      
+      NAME_RE = r"[A-Za-z0-9][A-Za-z0-9@/:._+-]*"
+      VER_RE = r"[A-Za-z0-9][A-Za-z0-9._+-]*"
+      KEY_RE = r"[a-z][a-z0-9_.]*"
+      GEN = "# @generated by apply-seed.py -- edit the profile, not this file"
+      
+      
+      def _checked(kind, value, pattern, what):
+          if not isinstance(value, str) or not value.strip():
+              die(kind, f"every {what} must be a non-empty string")
+          if not re.fullmatch(pattern, value):
+              die(kind, f"{value!r} is not a plain {what} (must match {pattern})")
+          return value
+      
+      
+      def _write(path, text):
+          changed = not path.exists() or path.read_text() != text
+          if changed:
+              path.write_text(text)
+          return changed
+      
+      
+      def apply_tools(tools, user):
+          """Render [tools] to a mise manifest on the volume and install it."""
+          if tools is None:
+              return
+          if not isinstance(tools, dict):
+              die("tools", '[tools] must be a table of "tool" = "exact version"')
+          settings = tools.get("settings", {})
+          if not isinstance(settings, dict):
+              die("tools", "[tools.settings] must be a table")
+          root = STATE / "mise"
+          lines = [GEN, "[tools]"]
+          for name, ver in tools.items():
+              if name == "settings":
+                  continue
+              lines.append(f'"{_checked("tools", name, NAME_RE, "tool name")}" = '
+                           f'"{_checked("tools", ver, VER_RE, "version pin")}"')
+          if settings:
+              lines += ["", "[settings]"]
+              for k, v in settings.items():
+                  _checked("tools.settings", k, KEY_RE, "setting name")
+                  if isinstance(v, bool) or isinstance(v, int):
+                      lines.append(f"{k} = {str(v).lower() if isinstance(v, bool) else v}")
+                  else:
+                      lines.append(f'{k} = "{_checked("tools.settings", v, VER_RE, "setting value")}"')
+          for d in ("config", "data", "cache", "state"):
+              (root / d).mkdir(parents=True, exist_ok=True)
+          changed = _write(root / "config/config.toml", "\n".join(lines) + "\n")
+          env = root / "env"
+          _write(env, "\n".join(
+              [GEN]
+              + [f"export MISE_{k}_DIR={root}/{k.lower()}" for k in ("DATA", "CACHE", "CONFIG", "STATE")]
+              + [f'export PATH="{STATE}/bin:{root}/data/shims:$PATH"']) + "\n")
+          run(f"own {root}", ["chown", "-R", f"{user}:{user}", str(root)])
+      
+          hook = f'[ -f "{env}" ] && . "{env}"'
+          rc = STATE / "shellrc"
+          txt = rc.read_text() if rc.exists() else ""
+          if hook not in txt:
+              rc.write_text(txt + ("\n" if txt and not txt.endswith("\n") else "") + hook + "\n")
+              run(f"own {rc}", ["chown", f"{user}:{user}", str(rc)])
+      
+          if all(k == "settings" for k in tools):
+              return
+          if not (STATE / "bin/mise").exists():
+              die("tools", f"pins declared but {STATE}/bin/mise is missing — "
+                           f"see the [setup] bootstrap in profile.default.toml")
+          pre = f'set -euo pipefail; . "{env}"; '
+          if changed or not (root / "config/mise.lock").exists():
+              run("tools: install + relock", None, user=user,
+                  shell_cmd=pre + "MISE_LOCKED=false mise install --yes && "
+                                  "MISE_LOCKED=false mise lock -g")
+          else:
+              run("tools: install (locked)", None, user=user,
+                  shell_cmd=pre + "mise install --yes")
+      
+      
+      def main() -> None:
+          if len(sys.argv) != 3:
+              print("usage: apply-seed.py <profile.toml> <user>", file=sys.stderr)
+              sys.exit(2)
+          path, user = Path(sys.argv[1]), sys.argv[2]
+      
+          if not path.is_file():
+              die("read seed", f"{path} does not exist — the control plane did not push a seed")
+          try:
+              seed = tomllib.loads(path.read_text())
+          except tomllib.TOMLDecodeError as e:
+              die("parse seed", f"{path} is not valid TOML: {e}")
+      
+          known = {"packages", "repos", "persist", "setup", "tools"}
+          unknown = set(seed) - known
+          if unknown:
+              die("parse seed", f"unknown top-level key(s): {', '.join(sorted(unknown))}. "
+                                f"Known: {', '.join(sorted(known))}")
+          setup = seed.get("setup", {})
+          if not isinstance(setup, dict):
+              die("parse seed", "[setup] must be a table")
+          unknown_setup = set(setup) - {"once", "every_boot"}
+          if unknown_setup:
+              die("parse seed", f"unknown key(s) in [setup]: {', '.join(sorted(unknown_setup))}. "
+                                f"Known: once, every_boot")
+      
+          apply_packages(seed.get("packages"), user)
+          apply_persist(seed.get("persist"), user)
+          apply_repos(seed.get("repos"), user)
+          apply_once(setup.get("once"), user)
+          apply_tools(seed.get("tools"), user)
+          apply_every_boot(setup.get("every_boot"), user)
+      
+          status("ok")
+          print("[seed] ok", flush=True)
+      
+      
+      if __name__ == "__main__":
+          os.umask(0o022)
+          main()
+  - path: /opt/daybox/profile.toml
+    content: |
+      [meta]
+      owner = "alice"
+      
+      [packages]
+      apt = ["ripgrep", "htop"]
+      
+      [setup]
+      once = """
+      echo hello
+      # this #-line is INSIDE a multiline string — it must survive (content)
+      echo done
+      """
+  - path: /opt/daybox/firstboot.sh
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      # Substrate, then the profile's seed. Runs once via runcmd;
+      # logs: /var/log/cloud-init-output.log
+      #
+      # set -e, and NO `|| true` anywhere: a box that comes up missing part of
+      # what was asked for is worse than one that fails, because it looks fine.
+      # Every failure lands in seed.status, which `daybox up` reads and refuses
+      # to attach on.
+      set -euo pipefail
+
+      STATUS=/var/lib/daybox/seed.status
+      mkdir -p /var/lib/daybox
+      rm -f "$STATUS"
+      fail() {
+          # apply-seed.py writes a precise reason; don't clobber it with a
+          # generic one.
+          if ! grep -q '^FAILED' "$STATUS" 2>/dev/null; then
+              echo "FAILED: firstboot aborted (see /var/log/cloud-init-output.log)" > "$STATUS"
+          fi
+      }
+      trap fail ERR
+
+      # ---- ingress lockdown, FIRST ----
+      # The bootcmd raw netfilter rules have covered ingress since the first
+      # moment of boot; ufw is the canonical policy from here on. This runs
+      # before ANYTHING that can fail (volume wait, seed), so no failure mode
+      # leaves a box without the lockdown: default-deny inbound, the control
+      # plane's IP as the only allowed source (reaper probe + clean volume
+      # unmount). Interactive access is over the daybox net — the agent
+      # proxies net-side :22 to 127.0.0.1:22 over loopback (ufw always
+      # permits lo); direct tsnet falls back to DERP (outbound), so the
+      # tunnel survives this default-deny inbound policy. The seed only ever
+      # needs OUTBOUND (apt, git clone, installers).
+      ufw default deny incoming
+      ufw default allow outgoing
+      ufw allow from 203.0.113.10 to any port 22 proto tcp
+      ufw --force enable
+
+      # ---- workspace volume ----
+      DEV=/dev/disk/by-id/scsi-0HC_Volume_123456
+      for i in $(seq 1 60); do
+          if [ -e "$DEV" ]; then break; fi
+          sleep 2
+      done
+      if [ ! -e "$DEV" ]; then
+          echo "FAILED: workspace volume $DEV never appeared" > "$STATUS"
+          exit 1
+      fi
+      mkdir -p /work
+      if ! grep -q "$DEV" /etc/fstab; then
+          echo "$DEV /work ext4 discard,nofail,defaults 0 0" >> /etc/fstab
+      fi
+      if ! mountpoint -q /work; then mount /work; fi
+      mkdir -p /work/repos /work/state
+
+      # ---- git identity: generated once, lives on the volume ----
+      # Quoted heredoc, NOT printf: the values are substituted at render
+      # time and may contain quotes (O'Brien) — inside <<'…' they are data.
+      # The renderer guarantees they are single-line.
+      if [ ! -s /work/state/gitconfig ]; then
+          cat > /work/state/gitconfig <<'GITCFG'
+      [user]
+          name = Alice O'Brien
+          email = alice@example.com
+      [init]
+          defaultBranch = main
+      GITCFG
+      fi
+      mkdir -p /work/state/ssh
+      if [ ! -f /work/state/ssh/id_ed25519 ]; then
+          ssh-keygen -t ed25519 -N "" -f /work/state/ssh/id_ed25519 -C "daybox-github"
+      fi
+      chmod 700 /work/state/ssh
+      chmod 600 /work/state/ssh/id_ed25519
+      chown -R dev:dev /work
+
+      # ---- the user's environment ----
+      H=/home/dev
+      # create ~/.local tree user-owned BEFORE anything writes under it
+      install -d -o dev -g dev "$H/.local" "$H/.local/bin" "$H/.local/share"
+      install -o dev -g dev -m 0644 /opt/daybox/tmux.conf "$H/.tmux.conf"
+      install -o dev -g dev -m 0755 /opt/daybox/devbox-tmux "$H/.local/bin/devbox-tmux"
+      install -d -o dev -g dev "$H/.config"
+
+      ln -sf /work/state/gitconfig "$H/.gitconfig"
+      chown -h dev:dev "$H/.gitconfig"
+
+      # volume-resident shell config — user additions to /work/state/shellrc
+      # survive reaps without a template change
+      echo '[ -f /work/state/shellrc ] && . /work/state/shellrc' >> "$H/.bashrc"
+
+      # git-over-ssh uses the volume-resident key on every summoned box
+      install -d -o dev -g dev -m 0700 "$H/.ssh"
+      printf 'Host github.com\n    IdentityFile /work/state/ssh/id_ed25519\n    StrictHostKeyChecking accept-new\n' > "$H/.ssh/config"
+      chown dev:dev "$H/.ssh/config"
+      chmod 600 "$H/.ssh/config"
+      systemctl reload ssh
+
+      # ---- the profile's seed: everything this box actually carries ----
+      /opt/daybox/apply-seed.py /opt/daybox/profile.toml dev
+
+      echo ok > "$STATUS"
+
+runcmd:
+  - [/opt/daybox/firstboot.sh]
