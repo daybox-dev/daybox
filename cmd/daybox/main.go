@@ -12,6 +12,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"log"
 	"os"
 )
@@ -20,8 +21,8 @@ import (
 // Unstamped local builds report "dev".
 var version = "dev"
 
-func usage() {
-	fmt.Fprintf(os.Stderr, `usage: daybox <command> [flags]
+// usageText is a constant so tests can assert against it without writing.
+const usageText = `usage: daybox <command> [flags]
 
 A profile is a whole daybox (own server + volume + creds); add -p <name> to
 any everyday verb to target one (default: 'default'). See README: Profiles.
@@ -47,58 +48,74 @@ plumbing (used by machines more than people):
   join             devbox-side net node (runs under systemd on boxes)
   relay            control-plane proposal intake (runs under systemd there)
   ip               bring the net node up, print its address
-  version          print the binary version
+  version          print the binary version (-v / --version also work)
 
 Deployment config lives in ~/.config/daybox/config.local — written by
 'daybox init', documented in the README (Configuration).
-`)
+`
+
+func usage(w io.Writer) {
+	fmt.Fprint(w, usageText)
 }
 
 func main() {
 	log.SetFlags(0)
 	log.SetPrefix("daybox: ")
-	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run is main's testable core: it routes the verb (profile flags are parsed
+// inside each command) and returns the process exit code. Streams are
+// parameters so dispatch-level behavior — version flags, usage — is unit-
+// testable without building a binary. Commands that delegate or do real work
+// may call os.Exit/log.Fatal themselves (unchanged from the pre-refactor
+// behavior); run's return value is authoritative only for the simple paths.
+func run(args []string, stdout, stderr io.Writer) int {
+	if len(args) < 1 {
+		usage(stderr)
+		return 2
 	}
-	args := os.Args[2:]
-	switch os.Args[1] {
+	rest := args[1:]
+	switch args[0] {
 	case "init":
-		cmdInit(args)
+		cmdInit(rest)
 	case "upgrade":
-		cmdUpgrade(args)
+		cmdUpgrade(rest)
 	case "enroll":
-		cmdEnroll(args)
+		cmdEnroll(rest)
 	case "up":
-		cmdUp(args)
+		cmdUp(rest)
 	case "ssh":
-		cmdSSH(args)
+		cmdSSH(rest)
 	case "attach":
-		cmdAttach(args)
+		cmdAttach(rest)
 	case "status":
-		cmdDelegateP("status", args)
+		cmdDelegateP("status", rest)
 	case "down":
-		cmdDelegateP("down", args)
+		cmdDelegateP("down", rest)
 	case "net": // deprecated spelling — folded into status; kept for muscle memory
 		cmdDelegate("net")
 	case "profile":
-		cmdProfile(args)
+		cmdProfile(rest)
 	case "join":
-		cmdJoin(args)
+		cmdJoin(rest)
 	case "relay":
-		cmdRelay(args)
+		cmdRelay(rest)
 	case "dial":
-		cmdDial(args)
+		cmdDial(rest)
 	case "ip":
-		cmdIP(args)
-	case "version", "--version":
-		fmt.Println(version)
+		cmdIP(rest)
+	case "version", "-v", "--version":
+		fmt.Fprintln(stdout, version)
+		return 0
 	case "help", "-h", "--help":
-		usage()
+		usage(stderr)
+		return 0
 	default:
-		usage()
-		os.Exit(2)
+		usage(stderr)
+		return 2
 	}
+	return 0
 }
 
 // say narrates progress to stderr — the CLI explains what it's doing and
