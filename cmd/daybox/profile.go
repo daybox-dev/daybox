@@ -7,6 +7,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
+
+	"github.com/BurntSushi/toml"
 )
 
 // profile.go — the plane-side config + profile model, ported from
@@ -75,6 +78,14 @@ type profile struct {
 	netUser          string
 	gitName          string
 	gitEmail         string
+
+	// keep is the profile's user-declared file-freshness keep-signals
+	// from keep.toml — the reaper keeps the box if ANY declared path has
+	// a file with mtime within its window (OR semantics). Absent file =
+	// nil = ssh+load only (the safe baseline). NOT a config.local knob
+	// (flat KEY=VALUE, shared with bash) and NOT the seed (frozen at
+	// render); a live-editable sidecar that takes effect on the next tick.
+	keep []keepSignal
 
 	// deployment-wide values a profile does not override
 	littleboxIP   string
@@ -165,6 +176,10 @@ func (d *deployment) deriveProfile(name string) (*profile, error) {
 	if err := validateIdentity(p.littleboxIP, p.remoteUser); err != nil {
 		return nil, err
 	}
+	// keep.toml: per-profile file-freshness keep-signals (absent = ssh+load
+	// only). A bad entry degrades to ignoring that signal, never to a
+	// hard error that would skip reaping the profile.
+	p.keep = loadKeepToml(filepath.Join(p.profileConf, "keep.toml"))
 	return p, nil
 }
 
@@ -197,6 +212,82 @@ func (p *profile) volumeIDFile() string    { return filepath.Join(p.profileState
 func (p *profile) idleTicksFile() string   { return filepath.Join(p.profileState, "idle_ticks") }
 func (p *profile) unreachTicksFile() string { return filepath.Join(p.profileState, "unreachable_ticks") }
 func (p *profile) agentVersionFile() string { return filepath.Join(p.profileState, "agent_version") }
+
+// keepTomlFile is the per-profile file-freshness sidecar: a box is kept if
+// ANY declared path has a fresh file (OR semantics). Plane-side, next to
+// the config overlay — NOT config.local (flat KEY=VALUE, shared with
+// bash) and NOT the seed (frozen into user_data at render). Absent =
+// ssh+load only (the safe baseline); no default is shipped.
+func (p *profile) keepTomlFile() string { return filepath.Join(p.profileConf, "keep.toml") }
+
+// keepSignal is one user-declared file-freshness signal from keep.toml.
+// The reaper keeps the box if any signal's path has a file with mtime
+// within `within`. path is shell-validated at load; within is parsed
+// from a duration string ("10m") via time.Duration's TextUnmarshaler.
+type keepSignal struct {
+	path   string
+	within time.Duration
+}
+
+// keepFileEntry is the TOML decode shape for one [[files]] entry. within
+// is decoded as a STRING and parsed per-entry with time.ParseDuration —
+// decoding it as a bare time.Duration makes one bad value ("not-a-duration")
+// fail the WHOLE file's decode, so a single typo would drop every signal.
+// A string per-entry lets one bad within degrade just that entry.
+type keepFileEntry struct {
+	Path   string `toml:"path"`
+	Within string `toml:"within"` // "10m" → parsed below
+}
+
+// loadKeepToml reads a profile's keep.toml. NEVER returns a hard error:
+// keep.toml is a REAPER input only, and a hard error would make
+// deriveProfile fail, which makes reapRun SKIP the whole profile (box
+// bills until the lifetime cap) — the more expensive failure. Instead:
+//   - absent file → nil (the safe ssh+load baseline)
+//   - structurally invalid TOML → log + nil (reap on ssh+load + cap)
+//   - a bad entry (non-absolute path, shell-unsafe char, bad within) →
+//     log + skip THAT entry (degrade to ignoring that signal, never to
+//     keeping the box forever). The good entries in the same file still
+//     fire. A non-existent path on the box is not an error here — it
+//     surfaces as file=0 (not fresh) at probe time.
+func loadKeepToml(path string) []keepSignal {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			say("[keep] could not read %s: %v — ignoring file-signals (ssh+load only)", path, err)
+		}
+		return nil
+	}
+	var doc struct {
+		Files []keepFileEntry `toml:"files"`
+	}
+	if _, err := toml.Decode(string(b), &doc); err != nil {
+		say("[keep] %s is not valid TOML: %v — ignoring all file-signals (ssh+load only)", path, err)
+		return nil
+	}
+	var out []keepSignal
+	for _, f := range doc.Files {
+		if !keepPathRe.MatchString(f.Path) {
+			say("[keep] skipping invalid path %q (must be absolute, no shell metachars)", f.Path)
+			continue
+		}
+		if f.Within == "" {
+			say("[keep] skipping %s: missing within (e.g. within = \"10m\")", f.Path)
+			continue
+		}
+		dur, err := time.ParseDuration(f.Within)
+		if err != nil {
+			say("[keep] skipping invalid within %q for %s (must be a duration like 10m)", f.Within, f.Path)
+			continue
+		}
+		if dur <= 0 {
+			say("[keep] skipping non-positive within %v for %s", dur, f.Path)
+			continue
+		}
+		out = append(out, keepSignal{path: f.Path, within: dur})
+	}
+	return out
+}
 
 // volumeID reads the cached volume id, or errors with setup help (bash:
 // "profile has no volume yet — run: daybox setup").
@@ -258,6 +349,7 @@ func amPlane() bool { return loadConfig().controlHost() == "" }
 var (
 	ipv4Re   = regexp.MustCompile(`^[0-9]{1,3}(\.[0-9]{1,3}){3}$`)
 	unameRe  = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	keepPathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 )
 
 func validateIdentity(littleboxIP, remoteUser string) error {

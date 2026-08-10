@@ -18,24 +18,51 @@ import (
 //   - it has been idle for REAP_AFTER_IDLE_MIN (counted in 5min ticks); OR
 //   - it has been unreachable for 1h (a zombie that still bills).
 //
-// Three busy signals (bash reap_one): ssh sessions, load, and RECENT CLAUDE
-// TRANSCRIPT WRITES — a detached claude on an API-bound task shows load
-// ~0.2 and zero connections, and the reaper once killed one mid-task one
-// minute before its last transcript write. Misconfigured knobs degrade
-// toward KEEPING the box, never toward a surprise reap (a non-numeric
-// LOAD_BUSY would compare as 0 = always busy = never reaped, meter runs;
-// an IDLE_MIN under one tick would reap on the first quiet probe).
+// Three busy signals (bash reap_one): ssh sessions, load, and a
+// file-freshness signal — a detached agent on an API-bound task shows
+// load ~0.2 and zero connections, and the reaper once killed one mid-task
+// one minute before its last transcript write. The file-freshness signal
+// is user-declared per profile in keep.toml (the [keep] table); the old
+// hardcoded /work/state/claude/projects path is gone — a pi user, a
+// build, a dev server declare their own paths. An absent keep.toml means
+// ssh+load only (the safe baseline); the lifetime cap bounds spend
+// regardless. Misconfigured knobs degrade toward KEEPING the box, never
+// toward a surprise reap (a non-numeric LOAD_BUSY would compare as 0 =
+// always busy = never reaped, meter runs; an IDLE_MIN under one tick
+// would reap on the first quiet probe).
 
 // reapOps is the injectable surface for the reaper's on-box busy probe.
 // Tests fake it to assert the cap / idle / unreachable decisions without
 // a box or headscale.
 type reapOps interface {
-	// busyProbe ssh's the box for the three busy signals, returning
-	// (sshConnections, loadAvg1min, recentTranscriptWrite, error). A
+	// busyProbe ssh's the box for the busy signals, returning ssh
+	// connection count, 1-min load, and a per-signal file-freshness
+	// result (one per declared [keep] entry, in declaration order). A
 	// non-nil error means the box was unreachable this tick.
-	busyProbe(ip string) (conns int, load float64, working bool, err error)
+	busyProbe(ip string) (conns int, load float64, files []fileSignalResult, err error)
 	// down reaps the box (volume detach + server delete + net node drop).
 	down(p *profile) error
+}
+
+// fileSignalResult is one [keep] file-signal's result: whether any file
+// under its path was fresh within its window. The path is carried
+// alongside so reapOne can log WHICH signal kept the box.
+type fileSignalResult struct {
+	path  string
+	fresh bool
+}
+
+// anyFresh is the OR over [keep] file-signals: the box is kept if ANY
+// declared path has a fresh file. Returns the first fresh signal's path
+// for logging ("kept by file-signal <path>"). Pure so the OR is
+// unit-testable without a fake or ssh.
+func anyFresh(files []fileSignalResult) (fresh bool, path string) {
+	for _, f := range files {
+		if f.fresh {
+			return true, f.path
+		}
+	}
+	return false, ""
 }
 
 // reapOne is the per-profile reaper. Returns nil always (bash: "Must end
@@ -73,7 +100,7 @@ func reapOne(p *profile, prov Provider, ops reapOps) error {
 		}
 	}
 
-	conns, load, working, probeErr := ops.busyProbe(s.IP)
+	conns, load, files, probeErr := ops.busyProbe(s.IP)
 	if probeErr != nil {
 		// unreachable: tick the unreachable counter; an hour = zombie reaped
 		u := readInt(p.unreachTicksFile()) + 1
@@ -86,7 +113,7 @@ func reapOne(p *profile, prov Provider, ops reapOps) error {
 		return nil
 	}
 
-	// reachable: reset unreachable, evaluate the three busy signals
+	// reachable: reset unreachable, evaluate the busy signals
 	writeFile(p.unreachTicksFile(), "0")
 	// degrade toward KEEP: a bad LOAD_BUSY defaults to 0.40, never to 0
 	loadBusy := p.loadBusy
@@ -98,8 +125,12 @@ func reapOne(p *profile, prov Provider, ops reapOps) error {
 	if need < 1 {
 		need = 1 // an IDLE_MIN under one tick would reap on the first quiet probe
 	}
-	if conns > 0 || working || load >= loadBusy {
+	fileFresh, freshPath := anyFresh(files)
+	if conns > 0 || fileFresh || load >= loadBusy {
 		writeFile(p.idleTicksFile(), "0")
+		if fileFresh {
+			say("[%s] kept by file-signal %s", p.name, freshPath)
+		}
 		return nil
 	}
 	ticks := readInt(p.idleTicksFile()) + 1
@@ -158,40 +189,67 @@ func newPlaneReapOps(p *profile, prov Provider) *planeReapOps {
 }
 
 // busyProbe runs the on-box probe (bash: the timeout 30 ssh) and parses
-// its key=value output. Three signals today: ssh session count (excluding
-// the control plane), the 1min load, and a recent claude transcript write.
-// A timeout/wedge returns an error (unreachable this tick) — the reaper
-// must never hang on a wedged box.
+// its key=value output. Two fixed signals — ssh session count (excluding
+// the control plane) and the 1min load — plus one file= signal per declared
+// [keep] entry. A timeout/wedge returns an error (unreachable this tick) —
+// the reaper must never hang on a wedged box.
 //
 // The probe emits one line per signal as key=value (conns=N, load=F,
-// file=0|1), parsed by key in parseProbeOutput — not positionally. The
-// previous positional parser conflated a false third signal (find emits
-// nothing → the line vanished) with a short read (ssh truncated), both
-// looked like len<3, and the false-signal case ticked the box unreachable
-// every quiet tick. Emitting file=0 when stale separates "signal is false"
-// from "probe got cut off", and makes the signal count composable for the
-// per-profile [keep] table (Phase B) without a positional guard to keep
-// in sync.
-func (o *planeReapOps) busyProbe(ip string) (int, float64, bool, error) {
-	probe := `echo "conns=$(ss -Htn state established '( sport = :22 )' | grep -vc '` + o.p.littleboxIP + `')"; ` +
-		`echo "load=$(cut -d' ' -f1 /proc/loadavg)"; ` +
-		`echo "file=$(find /work/state/claude/projects -type f -newermt '-10 minutes' 2>/dev/null | head -1 | grep -c .)"`
+// file=0|1 per keep entry), parsed by key in parseProbeOutput — not
+// positionally. file=0 when stale (not an absent line) separates "signal
+// is false" from "probe got cut off". With zero [keep] entries the probe
+// emits no file= lines and the box is judged on ssh+load only (the safe
+// baseline). The short-read guard: conns+load required, and exactly
+// len(keep) file= lines required; a shortfall is an error → unreachable
+// tick → 1h zombie reap, never a 30min idle reap that would kill a
+// working box.
+//
+// The hardcoded /work/state/claude/projects path this replaced was the
+// single-tool limitation: a pi user, a build, a dev server had no
+// equivalent signal. It is now user-declared per profile in keep.toml.
+func (o *planeReapOps) busyProbe(ip string) (int, float64, []fileSignalResult, error) {
+	var probe strings.Builder
+	probe.WriteString(`echo "conns=$(ss -Htn state established '( sport = :22 )' | grep -vc '`)
+	probe.WriteString(o.p.littleboxIP)
+	probe.WriteString(`')"; echo "load=$(cut -d' ' -f1 /proc/loadavg)"`)
+	for _, k := range o.p.keep {
+		// ceil(within / 1min), floored at 1. The reaper ticks every 5min,
+		// so sub-5min windows are misleading but not forbidden — the
+		// lifetime cap is the hard bound either way (design lean: don't
+		// enforce a floor, document it).
+		mins := int(k.within / time.Minute)
+		if k.within%time.Minute != 0 {
+			mins++
+		}
+		if mins < 1 {
+			mins = 1
+		}
+		probe.WriteString(`; echo "file=$(find `)
+		probe.WriteString(shq(k.path)) // single-quoted; keepPathRe already rejected shell-unsafe
+		probe.WriteString(` -type f -newermt '-`)
+		probe.WriteString(strconv.Itoa(mins))
+		probe.WriteString(` minutes' 2>/dev/null | head -1 | grep -c .)"`)
+	}
 	args := []string{"timeout", "30", "ssh"}
 	args = append(args, sshBoxOpts(o.p)...)
-	args = append(args, o.p.remoteUser+"@"+ip, probe)
+	args = append(args, o.p.remoteUser+"@"+ip, probe.String())
 	c := exec.Command(args[0], args[1:]...)
 	out, err := c.Output()
 	if err != nil {
-		return 0, 0, false, err
+		return 0, 0, nil, err
 	}
-	conns, load, fileFresh, perr := parseProbeOutput(string(out))
+	conns, load, fileVals, perr := parseProbeOutput(string(out))
 	if perr != nil {
-		return 0, 0, false, perr
+		return 0, 0, nil, perr
 	}
-	if len(fileFresh) != 1 {
-		return 0, 0, false, fmt.Errorf("short probe output: expected 1 file signal, got %d", len(fileFresh))
+	if len(fileVals) != len(o.p.keep) {
+		return 0, 0, nil, fmt.Errorf("short probe output: expected %d file signals, got %d", len(o.p.keep), len(fileVals))
 	}
-	return conns, load, fileFresh[0], nil
+	files := make([]fileSignalResult, len(o.p.keep))
+	for i, k := range o.p.keep {
+		files[i] = fileSignalResult{path: k.path, fresh: fileVals[i]}
+	}
+	return conns, load, files, nil
 }
 
 // parseProbeOutput parses the on-box probe's key=value output into its

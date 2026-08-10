@@ -164,22 +164,58 @@ sanity-check template changes before a paid summon.
 
 Probes the big box over ssh for (a) established inbound `:22` connections,
 excluding the control plane's own probe by `$LITTLEBOX_IP`, and (b) 1-minute
-loadavg:
+loadavg, plus (c) any **file-freshness keep-signals** the profile declares
+(see [keep-signals](#keep-signals--what-keeps-a-detached-box-alive) below):
 
-- busy (connections > 0 **or** load ≥ `$LOAD_BUSY`) → reset idle counter
+- busy (connections > 0 **or** a fresh keep-signal **or** load ≥ `$LOAD_BUSY`)
+  → reset idle counter
 - idle → increment; at `REAP_AFTER_IDLE_MIN` (30min) → `daybox down`
 - unreachable → separate counter; at 1h → force reap, because an unreachable
   server still bills
 
-There's a third busy signal for detached agents: **no claude transcript
-writes in the last 10min** is part of "idle", so a detached claude keeps
-working unreaped even though API-bound work shows near-zero load. `daybox
-down` cleanly unmounts `/work`, detaches the volume, then deletes the server.
-Counters live in `~/.config/daybox/state/`.
+The keep-signals generalize a signal that used to be hardcoded to one
+product path (recent claude transcript writes): a detached agent on an
+API-bound task shows load ~0.2 and zero connections, and the reaper once
+killed one mid-task a minute before its last write. Now **you declare what
+"active" means for your box** per profile — a pi user points it at
+`~/.pi/agent/sessions`, a build user at a log file, a claude user at
+`/work/state/claude/projects`. An absent declaration means the reaper relies
+on ssh conns + load only (the safe baseline); the lifetime cap bounds spend
+regardless. `daybox down` cleanly unmounts `/work`, detaches the volume,
+then deletes the server. Counters live in `~/.config/daybox/state/`.
 
 Deliberate consequence: ssh sessions ride plain **sshd** everywhere (no
 tailscale-ssh), so the established-`:22` probe stays an accurate liveness
 signal.
+
+### Keep-signals — what keeps a detached box alive
+
+A per-profile sidecar `~/.config/daybox/profiles/<name>/keep.toml` declares
+file-freshness keep-signals — paths whose recent modification means the box
+is in use, even with no ssh session and near-zero load (a detached agent,
+a long build, a dev server). OR semantics: the box is kept if **any**
+declared path has a file with an mtime within its `within` window.
+
+```toml
+# ~/.config/daybox/profiles/<name>/keep.toml
+[[files]]
+path   = "/work/state/claude/projects"   # absolute; volume-relative in practice
+within = "10m"                            # fresh if a file's mtime is within this
+
+[[files]]
+path   = "/work/state/pi/.pi/agent/sessions"
+within = "10m"
+```
+
+No default `keep.toml` is shipped. An absent file means the reaper relies on
+ssh conns + load only (the safe baseline); a detached agent doing bursty
+API-bound work is no longer protected by default — declare the path it
+writes to. The hard lifetime cap (`MAX_LIFETIME_HOURS`) bounds spend no
+matter how generous the keep-signals are. Paths must be absolute and
+contain no shell metacharacters; a bad entry is logged and skipped
+(degrade to ignoring that signal, never to keeping the box forever).
+`keep.toml` is live-editable on the control plane and takes effect on the
+next reaper tick — not the next summon.
 
 ### The net
 
