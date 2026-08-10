@@ -264,19 +264,26 @@ func cmdProfilePlane(p Parsed) {
 	name := p.Global("profile")
 	switch sub {
 	case "add":
+		// bash profile_add: name=${1:-} type=${2:-}. The name comes from -p
+		// when present; otherwise rest[0] is the name and rest[1] the type.
+		// (The grammar hoists -p into name, so rest is the positional tail.)
 		stype := ""
-		if len(rest) > 0 {
+		if name == "" {
+			if len(rest) > 0 {
+				name = rest[0]
+			}
+			if len(rest) > 1 {
+				stype = rest[1]
+			}
+		} else if len(rest) > 0 {
 			stype = rest[0]
-		}
-		if name == "" && len(rest) > 0 {
-			name = rest[0]
 		}
 		if name == "" {
 			log.Fatal("usage: daybox profile add <name> [server-type]")
 		}
 		if err := profileAdd(dep, name, stype); err != nil {
 			log.Fatal(err)
-	}
+		}
 	case "ls", "list", "":
 		profileLs(dep, os.Stdout)
 	case "use":
@@ -301,12 +308,19 @@ func cmdProfilePlane(p Parsed) {
 			log.Fatal(err)
 		}
 	case "rm", "remove":
+		// like add: name from -p or rest[0]; --purge is a trailing flag
+		// (the only option), so it is rest[1] when -p is absent, rest[0]
+		// when -p supplied the name.
 		purge := ""
-		if len(rest) > 0 {
+		if name == "" {
+			if len(rest) > 0 {
+				name = rest[0]
+			}
+			if len(rest) > 1 {
+				purge = rest[1]
+			}
+		} else if len(rest) > 0 {
 			purge = rest[0]
-		}
-		if name == "" && len(rest) > 0 {
-			name = rest[0]
 		}
 		if name == "" {
 			log.Fatal("usage: daybox profile rm <name> [--purge]")
