@@ -64,10 +64,25 @@ func pinHostkey(p *profile, ip string) error {
 	if exec.Command("ssh-keygen", "-R", ip, "-f", p.knownHosts).Run() != nil {
 		// non-fatal: a missing file or no entry is fine
 	}
-	// keyscan the box's keys, append to the profile's known_hosts
-	out, err := exec.Command("ssh-keyscan", "-t", "ed25519,rsa,ecdsa", ip).Output()
-	if err != nil {
-		return fmt.Errorf("ssh-keyscan %s: %w", ip, err)
+	// sshd opens :22 before it reliably serves its host-key banner — the
+	// port listens while cloud-init is still hammering the fresh box, so a
+	// single ssh-keyscan the instant nc -z succeeds races sshd and can come
+	// back empty (exit 1, no keys). Bash pin_hostkey used -T 5 and checked
+	// output SIZE, not the exit code, for the same reason; retry until it
+	// returns at least one key, the way waitReady's own loops ride out the
+	// same startup window.
+	deadline := time.Now().Add(30 * time.Second)
+	var out []byte
+	for time.Now().Before(deadline) {
+		o, err := exec.Command("ssh-keyscan", "-T", "5", "-t", "ed25519,rsa,ecdsa", ip).Output()
+		if err == nil && len(o) > 0 {
+			out = o
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if len(out) == 0 {
+		return fmt.Errorf("ssh-keyscan %s: no host keys (sshd never served them)", ip)
 	}
 	// ensure the file exists + is owned right (mkdir done in deriveProfile)
 	if err := os.WriteFile(p.knownHosts, append(out, '\n'), 0o600); err != nil {
