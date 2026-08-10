@@ -122,8 +122,8 @@ func TestNetTableParses(t *testing.T) {
 	// node-struct parse path directly via a helper that mimics netTable's
 	// JSON shape.
 	nodes := []netNode{
-		{ID: 4, GivenName: "emilios-macbook-air", Name: "emilios-macbook-air", IPAddresses: []string{"100.64.0.3"}, User: struct{ Name string `json:"name"` }{Name: "emilio"}, Online: false},
-		{ID: 57, GivenName: "daybox-default", Name: "daybox-default", IPAddresses: []string{"100.64.0.56"}, User: struct{ Name string `json:"name"` }{Name: "emilio"}, Connected: true, PreAuthKey: &struct{ Ephemeral bool `json:"ephemeral"` }{Ephemeral: true}},
+		{ID: 4, GivenName: "laptop-air", Name: "laptop-air", IPAddresses: []string{"100.64.0.3"}, User: struct{ Name string `json:"name"` }{Name: "operator"}, Online: false},
+		{ID: 57, GivenName: "daybox-default", Name: "daybox-default", IPAddresses: []string{"100.64.0.56"}, User: struct{ Name string `json:"name"` }{Name: "operator"}, Connected: true, PreAuthKey: &struct{ Ephemeral bool `json:"ephemeral"` }{Ephemeral: true}},
 	}
 	b, _ := json.Marshal(nodes)
 	var parsed []netNode
