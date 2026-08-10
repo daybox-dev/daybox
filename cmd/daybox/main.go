@@ -21,6 +21,14 @@ import (
 // Unstamped local builds report "dev".
 var version = "dev"
 
+// globalFlags are the flags the grammar hoists out of any position before
+// verb resolution. Today the only one is the profile selector -p/--profile,
+// shared by the everyday verbs (up/down/ssh/attach/status/reap/setup) and
+// the profile subverbs. Verbs that don't use it simply ignore the hoisted
+// value, the same cobra-style "persistent flag" model; no verb defines its
+// own -p/--profile, so the global can't shadow one.
+var globalFlags = []Global{{Short: "p", Long: "profile", TakesValue: true}}
+
 // usageText is a constant so tests can assert against it without writing.
 const usageText = `usage: daybox <command> [flags]
 
@@ -64,58 +72,77 @@ func main() {
 	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
 }
 
-// run is main's testable core: it routes the verb (profile flags are parsed
-// inside each command) and returns the process exit code. Streams are
+// run is main's testable core: it parses argv into a Command (grammar.go)
+// and routes the verb, returning the process exit code. Streams are
 // parameters so dispatch-level behavior — version flags, usage — is unit-
 // testable without building a binary. Commands that delegate or do real work
 // may call os.Exit/log.Fatal themselves (unchanged from the pre-refactor
 // behavior); run's return value is authoritative only for the simple paths.
+//
+// Parsing is single-pass: -p/--profile is hoisted out wherever it sits, so
+// the verb resolves regardless of flag position — the laptop's `daybox
+// <verb> -p <profile>` and the plane's re-parse of it agree (the round-trip
+// grammar_test.go asserts). version/help are pre-parse specials (flag-shaped
+// -v/-h are not verbs); everything else goes through Parse.
 func run(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		usage(stderr)
 		return 2
 	}
-	rest := args[1:]
 	switch args[0] {
-	case "init":
-		cmdInit(rest)
-	case "upgrade":
-		cmdUpgrade(rest)
-	case "enroll":
-		cmdEnroll(rest)
-	case "up":
-		cmdUp(rest)
-	case "ssh":
-		cmdSSH(rest)
-	case "attach":
-		cmdAttach(rest)
-	case "status":
-		cmdStatus(rest)
-	case "down":
-		cmdDown(rest)
-	case "net": // deprecated spelling — folded into status; kept for muscle memory
-		cmdDelegate("net")
-	case "reap":
-		cmdReap(rest)
-	case "setup":
-		cmdSetup(rest)
-	case "profile":
-		cmdProfile(rest)
-	case "join":
-		cmdJoin(rest)
-	case "relay":
-		cmdRelay(rest)
-	case "dial":
-		cmdDial(rest)
-	case "ip":
-		cmdIP(rest)
 	case "version", "-v", "--version":
 		fmt.Fprintln(stdout, version)
 		return 0
 	case "help", "-h", "--help":
 		usage(stderr)
 		return 0
+	}
+	c, err := Parse(args, globalFlags)
+	if err != nil {
+		fmt.Fprintln(stderr, "daybox:", err)
+		usage(stderr)
+		return 2
+	}
+	switch c.Verb() {
+	case "init":
+		cmdInit(c)
+	case "upgrade":
+		cmdUpgrade(c)
+	case "enroll":
+		cmdEnroll(c)
+	case "up":
+		cmdUp(c)
+	case "ssh":
+		cmdSSH(c)
+	case "attach":
+		cmdAttach(c)
+	case "status":
+		cmdStatus(c)
+	case "down":
+		cmdDown(c)
+	case "net": // deprecated spelling — folded into status; kept for muscle memory
+		cmdStatus(c)
+	case "reap":
+		cmdReap(c)
+	case "setup":
+		cmdSetup(c)
+	case "profile":
+		cmdProfile(c)
+	case "join":
+		cmdJoin(c)
+	case "relay":
+		cmdRelay(c)
+	case "dial":
+		cmdDial(c)
+	case "ip":
+		cmdIP(c)
+	case "":
+		// no non-flag token (e.g. bare `daybox` or `daybox -p x`): usage, not
+		// an unknown command.
+		usage(stderr)
+		return 2
 	default:
+		fmt.Fprintf(stderr, "daybox: unknown command %q\n", c.Verb())
 		usage(stderr)
 		return 2
 	}

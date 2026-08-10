@@ -36,7 +36,7 @@ const (
 	relayMaxPending  = 32        // per profile — bounds proposal-spam disk use
 )
 
-func cmdRelay(args []string) {
+func cmdRelay(p Parsed) {
 	fs := flag.NewFlagSet("relay", flag.ExitOnError)
 	f := addNetFlags(fs, filepath.Join(confDir(), "relay-tsnet"))
 	port := fs.Int("port", relayDefaultPort, "port to listen on (net-side only)")
@@ -47,7 +47,7 @@ func cmdRelay(args []string) {
 	// deployment
 	f.hostname = "daybox-relay"
 	fs.Lookup("hostname").DefValue = "daybox-relay"
-	fs.Parse(args)
+	fs.Parse(p.Rest())
 
 	if f.authKey() == "" && !fileExists(filepath.Join(f.state, "tailscaled.state")) {
 		f.authkey = relaySelfEnroll()

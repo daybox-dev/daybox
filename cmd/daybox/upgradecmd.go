@@ -35,11 +35,11 @@ import (
 	"syscall"
 )
 
-func cmdUpgrade(args []string) {
+func cmdUpgrade(p Parsed) {
 	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
 	var versionFlag string
 	fs.StringVar(&versionFlag, "version", "", "release payload to upgrade to (default: the binary's pinned version; latest for dev builds)")
-	fs.Parse(args)
+	fs.Parse(p.Rest())
 
 	cfg := loadConfig()
 	control := cfg.controlHost()

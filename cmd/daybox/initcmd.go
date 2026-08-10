@@ -37,7 +37,7 @@ type initOpts struct {
 	noEnroll   bool
 }
 
-func cmdInit(args []string) {
+func cmdInit(p Parsed) {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
 	o := &initOpts{}
 	fs.StringVar(&o.adopt, "adopt", "", "adopt an existing box (ssh destination, e.g. me@1.2.3.4 or an ssh alias)")
@@ -52,7 +52,7 @@ func cmdInit(args []string) {
 	fs.StringVar(&o.device, "device", "", "this device's name on the net (default: hostname)")
 	fs.StringVar(&o.version, "version", "", "release payload to provision from (default: the binary's pinned version; latest for dev builds)")
 	fs.BoolVar(&o.noEnroll, "no-enroll", false, "skip enrolling this device")
-	fs.Parse(args)
+	fs.Parse(p.Rest())
 
 	say("daybox init — one-time setup.")
 	say("")

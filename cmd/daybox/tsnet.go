@@ -99,7 +99,7 @@ func up(s *tsnet.Server) string {
 // join: the devbox side. Ephemeral node; anything that connects to this
 // node's :port on the net is proxied to -target (the box's own sshd), so
 // sshd itself never listens on the net — the agent is the only net surface.
-func cmdJoin(args []string) {
+func cmdJoin(p Parsed) {
 	fs := flag.NewFlagSet("join", flag.ExitOnError)
 	f := addNetFlags(fs, "/var/lib/daybox-agent")
 	port := fs.Int("port", 22, "port to expose on the net")
@@ -108,7 +108,7 @@ func cmdJoin(args []string) {
 		"localhost listener proxied to the control plane's relay (empty disables)")
 	relayPeer := fs.String("relay-peer", fmt.Sprintf("daybox-relay:%d", relayDefaultPort),
 		"the relay's name:port on the net")
-	fs.Parse(args)
+	fs.Parse(p.Rest())
 
 	s := f.server(true)
 	defer s.Close()
@@ -211,10 +211,10 @@ func proxy(c net.Conn, target string) {
 
 // dial: the device side. ssh ProxyCommand contract — connection bytes on
 // stdout, everything else on stderr.
-func cmdDial(args []string) {
+func cmdDial(p Parsed) {
 	fs := flag.NewFlagSet("dial", flag.ExitOnError)
 	f := addNetFlags(fs, defaultStateDir())
-	fs.Parse(args)
+	fs.Parse(p.Rest())
 	rest := fs.Args()
 	if len(rest) != 2 {
 		log.Fatal("usage: daybox dial [flags] HOST PORT")
@@ -272,10 +272,10 @@ func resolvePeer(s *tsnet.Server, name string) (string, bool) {
 	return "", false
 }
 
-func cmdIP(args []string) {
+func cmdIP(p Parsed) {
 	fs := flag.NewFlagSet("ip", flag.ExitOnError)
 	f := addNetFlags(fs, defaultStateDir())
-	fs.Parse(args)
+	fs.Parse(p.Rest())
 
 	s := f.server(false)
 	defer s.Close()
@@ -285,11 +285,11 @@ func cmdIP(args []string) {
 // enroll: put THIS device on the net, narrating each step. Requires ssh
 // access to the control plane (that access is the credential —
 // the pairing dashboard later replaces this ceremony).
-func cmdEnroll(args []string) {
+func cmdEnroll(p Parsed) {
 	fs := flag.NewFlagSet("enroll", flag.ExitOnError)
 	f := addNetFlags(fs, defaultStateDir())
 	device := fs.String("device", "", "name for this device on the net (default: hostname)")
-	fs.Parse(args)
+	fs.Parse(p.Rest())
 	if *device != "" {
 		f.hostname = *device
 	}

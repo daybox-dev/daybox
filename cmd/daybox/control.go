@@ -1,20 +1,28 @@
 package main
 
-import (
-	"errors"
-	"flag"
-	"log"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
-	"time"
-)
-
 // The control plane owns summon/reap/state; the laptop delegates to its
 // daybox over ssh ("the CLI lives where the user is", the control logic
 // lives where the credentials are). Remote path is ~-relative because
 // non-interactive ssh shells don't have ~/.local/bin on PATH.
+//
+// Every remote command the laptop hands the plane is produced by
+// Parsed.String (grammar.go) and re-parsed there by Parse — never
+// hand-concatenated. That round-trip is what makes `daybox <verb>
+// -p <profile>` work from the laptop regardless of where -p sits, the
+// class of bug that broke every laptop-side profile-flagged verb in
+// v0.3.0/v0.3.1 (the plane's args[0] dispatch rejected a leading -p).
+
+import (
+	"errors"
+	"flag"
+	"fmt"
+	"log"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"time"
+)
+
 const remoteDaybox = "~/.local/bin/daybox"
 
 func mustControl() string {
@@ -149,12 +157,15 @@ const sshMaxAttempts = 3
 // sshRetrySleep is the backoff sleeper, overridable in tests.
 var sshRetrySleep = time.Sleep
 
-// delegate runs a command on the control plane with this terminal wired
-// through; tty gives interactive verbs a remote pty. Retries on a
+// delegate runs a parsed command on the control plane with this terminal
+// wired through; tty gives interactive verbs a remote pty. The command is
+// the grammar's canonical form (Parsed.String), never a hand-built string,
+// so the plane re-parses exactly what the laptop intended. Retries on a
 // transport-level failure (see sshRetry) — safe because a 255 means the
 // connection never came up, so no prior shell exists to duplicate.
-func delegate(cmd string, tty bool) {
+func delegate(p Parsed, tty bool) {
 	host := mustControl()
+	cmd := remoteDaybox + " " + p.String()
 	err := sshRetry("control plane", func() error {
 		opts := sshOpts(!tty)
 		if tty {
@@ -172,49 +183,37 @@ func delegate(cmd string, tty bool) {
 	}
 }
 
-func cmdDelegate(verb string) { delegate(remoteDaybox+" "+verb, false) }
-
-// takeProfile pulls a -p/--profile <name> flag out of args (it may appear
-// anywhere) and returns the remote flag fragment (" -p name", already quoted)
-// plus the remaining args. The control plane's daybox accepts -p ahead of any
-// verb, so the laptop just forwards it — a profile is a whole daybox
-// (README: Profiles).
-func takeProfile(args []string) (string, []string) {
-	prof, rest := takeProfileName(args)
-	if prof == "" {
-		return "", rest
+// sshRunningBox is the plane-side half of `daybox ssh`/`attach`: probe the
+// running box for profile p, then ssh -t into it (the control plane is
+// allowlisted even under ingress lockdown), forwarding cmd as the remote
+// command — empty for an interactive shell. The laptop delegates these
+// verbs here, so the box's public :22 never needs to face the laptop.
+// Mirrors bash cmd_ssh/cmd_attach (cmd_attach was cmd_ssh with the tmux
+// wrapper as the command); the Go port had dropped this branch, so the
+// plane-side `daybox ssh`/`attach` delegated back into a fatal mustControl.
+func sshRunningBox(dep *deployment, p *profile, cmd []string) error {
+	prov, err := dep.loadProvider(p.provider)
+	if err != nil {
+		return err
 	}
-	return " -p " + shq(prof), rest
-}
-
-// takeProfileName is takeProfile without the remote quoting — for laptop
-// verbs that need the plain profile name itself.
-func takeProfileName(args []string) (string, []string) {
-	prof := ""
-	rest := make([]string, 0, len(args))
-	for i := 0; i < len(args); i++ {
-		a := args[i]
-		switch {
-		case a == "-p" || a == "--profile":
-			if i+1 < len(args) {
-				prof = args[i+1]
-				i++
-			}
-		case strings.HasPrefix(a, "-p="):
-			prof = strings.TrimPrefix(a, "-p=")
-		case strings.HasPrefix(a, "--profile="):
-			prof = strings.TrimPrefix(a, "--profile=")
-		default:
-			rest = append(rest, a)
+	s, err := prov.Probe(p.serverName)
+	if err != nil || s == nil {
+		return fmt.Errorf("no big box running — summon with: daybox up")
+	}
+	args := append([]string{"ssh"}, sshBoxOptsTty(p)...)
+	args = append(args, p.remoteUser+"@"+s.IP)
+	args = append(args, cmd...)
+	c := exec.Command(args[0], args[1:]...)
+	c.Stdout, c.Stderr, c.Stdin = os.Stdout, os.Stderr, os.Stdin
+	if err := c.Run(); err != nil {
+		if ee, ok := err.(*exec.ExitError); ok {
+			// propagate the ssh exit code (a remote command failure, not a
+			// transport failure) so `daybox ssh false` exits 1, not 255.
+			osExitWithCode(ee.ExitCode())
 		}
+		return err
 	}
-	return prof, rest
-}
-
-// cmdDelegateP delegates a no-arg verb, forwarding a -p profile selection.
-func cmdDelegateP(verb string, args []string) {
-	prof, _ := takeProfile(args)
-	delegate(remoteDaybox+prof+" "+verb, false)
+	return nil
 }
 
 // cmdProfile routes the `profile` group. The laptop-authority subverbs
@@ -222,48 +221,47 @@ func cmdDelegateP(verb string, args []string) {
 // NEVER delegate — approval is a laptop-side action by design (§1e). The
 // box/volume lifecycle subverbs (add/ls/use/rename/rm/seed) run on the
 // plane when amPlane, else delegate.
-func cmdProfile(args []string) {
-	if len(args) > 0 {
-		switch args[0] {
+func cmdProfile(p Parsed) {
+	rest := p.Rest()
+	if len(rest) > 0 {
+		switch rest[0] {
 		case "edit":
-			cmdProfileEdit(args[1:])
+			cmdProfileEdit(rest[1:])
 			return
 		case "proposals":
-			cmdProfileProposals(args[1:])
+			cmdProfileProposals(rest[1:])
 			return
 		case "accept":
-			cmdProfileAccept(args[1:])
+			cmdProfileAccept(rest[1:])
 			return
 		case "reject":
-			cmdProfileReject(args[1:])
+			cmdProfileReject(rest[1:])
 			return
 		case "propose":
-			cmdProfilePropose(args[1:])
+			cmdProfilePropose(rest[1:])
 			return
 		}
 	}
 	if amPlane() {
-		cmdProfilePlane(args)
+		cmdProfilePlane(p)
 		return
 	}
-	cmd := remoteDaybox + " profile"
-	for _, a := range args {
-		cmd += " " + shq(a)
-	}
-	delegate(cmd, false)
+	delegate(p, false)
 }
 
 // cmdProfilePlane runs the box/volume lifecycle subverbs locally on the
-// plane (add/ls/use/rename/rm/seed). Unknown subverb -> usage.
-func cmdProfilePlane(args []string) {
+// plane (add/ls/use/rename/rm/seed). Unknown subverb -> usage. The profile
+// name comes from the hoisted -p global (or a positional fallback), the
+// same as the everyday verbs; the grammar lifts -p out before dispatch.
+func cmdProfilePlane(p Parsed) {
 	dep := loadDeployment()
 	sub := "ls"
 	rest := []string{}
-	if len(args) > 0 {
-		sub = args[0]
-		rest = args[1:]
+	if r := p.Rest(); len(r) > 0 {
+		sub = r[0]
+		rest = r[1:]
 	}
-	name, rest := takeProfileName(rest)
+	name := p.Global("profile")
 	switch sub {
 	case "add":
 		stype := ""
@@ -345,11 +343,11 @@ func cmdProfilePlane(args []string) {
 // Bug #3: the plane no longer prints `IP`/`HOSTKEY` to stdout. The laptop
 // relies on the plane's exit code (0 = success) + the IP the plane says on
 // stderr (the user sees it either way); no stdout contract to parse.
-func cmdUp(args []string) {
-	name, rest := takeProfileName(args)
+func cmdUp(p Parsed) {
+	name := p.Global("profile")
 	fs := flag.NewFlagSet("up", flag.ExitOnError)
 	detach := fs.Bool("detach", false, "summon but don't connect")
-	fs.Parse(rest)
+	fs.Parse(p.Rest())
 	serverType := ""
 	if fs.NArg() > 0 {
 		serverType = fs.Arg(0)
@@ -358,21 +356,21 @@ func cmdUp(args []string) {
 	// PLANE role: do the summon here. No stdout IP/HOSTKEY contract (bug #3).
 	if amPlane() {
 		dep := loadDeployment()
-		p, err := dep.deriveProfile(profileNameOrCurrent(dep, name))
+		prof, err := dep.deriveProfile(profileNameOrCurrent(dep, name))
 		if err != nil {
 			log.Fatal(err)
 		}
 		if serverType != "" {
-			p.serverType = serverType
+			prof.serverType = serverType
 		}
-		prov, err := dep.loadProvider(p.provider)
+		prov, err := dep.loadProvider(prof.provider)
 		if err != nil {
 			log.Fatal(err)
 		}
 		if err := prov.CheckCredentials(); err != nil {
 			log.Fatal(err)
 		}
-		if err := summonUp(p, prov, *detach, newPlaneSshOps(p)); err != nil {
+		if err := summonUp(prof, prov, *detach, newPlaneSshOps(prof)); err != nil {
 			log.Fatal(err)
 		}
 		return
@@ -380,33 +378,18 @@ func cmdUp(args []string) {
 
 	// LAPTOP role: delegate to the plane. The profile is frozen into
 	// user_data at render time on the plane, so pending proposals get one
-	// last non-blocking look here before the summon.
+	// last non-blocking look here before the summon. The verb's own tokens
+	// (--detach, a server type) ride in p.String; the laptop only needs to
+	// know --detach to choose a pty for the plane's follow-up shell.
 	host := mustControl()
 	maybeOfferProposalReview(host, name)
-	prof := ""
-	if name != "" {
-		prof = " -p " + shq(name)
-	}
-	cmd := remoteDaybox + prof + " up"
-	if *detach {
-		cmd += " --detach"
-	}
-	if serverType != "" {
-		cmd += " " + shq(serverType)
-	}
 	say("summoning via %s (fresh boot takes ~60-90s)…", host)
-	// delegate runs the remote cmd with a pty; the plane's `up` ssh'es
-	// in itself when not --detach (bug #3: the plane owns the follow-up
-	// shell). delegate exits with the remote's code on failure.
-	// the plane ssh'd in already (bug #3: the plane owns the follow-up
-	// shell when not --detach); --detach just reports. Non-detach delegates
-	// (interactive pty).
 	if *detach {
-		delegate(cmd, false) // non-tty: the plane just reports
+		delegate(p, false) // non-tty: the plane just reports
 		say("box is up — connect with: daybox ssh   (tmux: daybox attach)")
 		return
 	}
-	delegate(cmd, true) // tty: the plane ssh'es in interactively
+	delegate(p, true) // tty: the plane ssh'es in interactively
 }
 
 // profileNameOrCurrent resolves the -p flag to a profile name, falling back
@@ -416,47 +399,62 @@ func profileNameOrCurrent(dep *deployment, explicit string) string {
 	return name
 }
 
-// shq single-quotes s for a remote POSIX shell.
-func shq(s string) string { return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'" }
-
 // cmdSSH: a fresh shell (or one-off command) on the box, hopping via the
 // control plane — works even when the box only allows the control plane in.
 // tmux is a user choice: `daybox attach` is the persistent session.
-func cmdSSH(args []string) {
-	prof, rest := takeProfile(args)
-	cmd := remoteDaybox + prof + " ssh"
-	for _, a := range rest {
-		// quote for the control plane's shell so the whole command reaches
-		// the box intact (unquoted, `; x` would run x on the control plane)
-		cmd += " " + shq(a)
+func cmdSSH(p Parsed) {
+	// PLANE role: ssh into the running box (bash cmd_ssh ran here). The
+	// laptop delegates `daybox ssh` here, so this is the box-facing half.
+	if amPlane() {
+		dep := loadDeployment()
+		prof, err := dep.deriveProfile(profileNameOrCurrent(dep, p.Global("profile")))
+		if err != nil {
+			log.Fatal(err)
+		}
+		if err := sshRunningBox(dep, prof, p.Rest()); err != nil {
+			log.Fatal(err)
+		}
+		return
 	}
-	delegate(cmd, true)
+	delegate(p, true)
 }
 
 // cmdAttach: the shared persistent tmux session — the only verb that
 // starts tmux; everything else lands in a plain shell.
-func cmdAttach(args []string) {
-	prof, _ := takeProfile(args)
-	delegate(remoteDaybox+prof+" attach", true)
+func cmdAttach(p Parsed) {
+	// PLANE role: ssh in running the tmux wrapper (bash cmd_attach was
+	// cmd_ssh with /home/$USER/.local/bin/devbox-tmux as the command).
+	if amPlane() {
+		dep := loadDeployment()
+		prof, err := dep.deriveProfile(profileNameOrCurrent(dep, p.Global("profile")))
+		if err != nil {
+			log.Fatal(err)
+		}
+		cmd := []string{"/home/" + prof.remoteUser + "/.local/bin/devbox-tmux"}
+		if err := sshRunningBox(dep, prof, cmd); err != nil {
+			log.Fatal(err)
+		}
+		return
+	}
+	delegate(p, true)
 }
 
 // cmdSetup: one-time bootstrap of the current profile (register keys,
 // seed profile.toml, create the volume). Plane-only; the laptop delegates.
-func cmdSetup(args []string) {
+func cmdSetup(p Parsed) {
 	if amPlane() {
 		if err := setup(loadDeployment()); err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
-	prof, _ := takeProfile(args)
-	delegate(remoteDaybox+prof+" setup", false)
+	delegate(p, false)
 }
 
 // cmdStatus: the whole deployment in one command. Role-gated: the plane
 // prints every profile's box + the net table; the laptop delegates.
-func cmdStatus(args []string) {
-	name, _ := takeProfileName(args)
+func cmdStatus(p Parsed) {
+	name := p.Global("profile")
 	if amPlane() {
 		dep := loadDeployment()
 		explicit := ""
@@ -466,47 +464,38 @@ func cmdStatus(args []string) {
 		statusRun(dep, os.Stdout, explicit)
 		return
 	}
-	prof := ""
-	if name != "" {
-		prof = " -p " + shq(name)
-	}
-	delegate(remoteDaybox+prof+" status", false)
+	delegate(p, false)
 }
 
 // cmdReap: idle-reaper entry (run by the systemd timer every 5min on the
 // plane). The plane loops every profile + reapOne; the laptop delegates.
-func cmdReap(args []string) {
+func cmdReap(p Parsed) {
 	if amPlane() {
 		reapRun(loadDeployment())
 		return
 	}
-	prof, _ := takeProfile(args)
-	delegate(remoteDaybox+prof+" reap", false)
+	delegate(p, false)
 }
 
 // cmdDown: delete the box now (billing stops). Role-gated like up: the plane
 // detaches the volume + reaps + drops the net node; the laptop delegates
 // (the Hetzner token lives on the plane).
-func cmdDown(args []string) {
-	name, _ := takeProfileName(args)
+func cmdDown(p Parsed) {
+	name := p.Global("profile")
 	if amPlane() {
 		dep := loadDeployment()
-		p, err := dep.deriveProfile(profileNameOrCurrent(dep, name))
+		prof, err := dep.deriveProfile(profileNameOrCurrent(dep, name))
 		if err != nil {
 			log.Fatal(err)
 		}
-		prov, err := dep.loadProvider(p.provider)
+		prov, err := dep.loadProvider(prof.provider)
 		if err != nil {
 			log.Fatal(err)
 		}
-		if err := downBox(p, prov, newPlaneDownOps(p)); err != nil {
+		if err := downBox(prof, prov, newPlaneDownOps(prof)); err != nil {
 			log.Fatal(err)
 		}
 		return
 	}
-	prof := ""
-	if name != "" {
-		prof = " -p " + shq(name)
-	}
-	delegate(remoteDaybox+prof+" down", false)
+	delegate(p, false)
 }
