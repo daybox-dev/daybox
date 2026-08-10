@@ -231,6 +231,55 @@ func loadBusyNaN() float64 {
 	return zero / zero // NaN
 }
 
+// parseProbeOutput (Phase A): the key=value probe parser. Replaces the
+// positional 3-line split. The invariant it preserves: a short or
+// malformed read is an error → unreachable tick, never silently idle.
+func TestParseProbeOutput(t *testing.T) {
+	// well-formed, all three signals present, file fresh
+	c, l, ff, err := parseProbeOutput("conns=2\nload=0.41\nfile=1\n")
+	if err != nil || c != 2 || l != 0.41 || len(ff) != 1 || !ff[0] {
+		t.Fatalf("good output: c=%d l=%v ff=%v err=%v", c, l, ff, err)
+	}
+	// file=0 (stale) is a PRESENT line — not a short read. This is the bug
+	// fix: the old positional parser saw len<3 when find emitted nothing.
+	c, l, ff, err = parseProbeOutput("conns=0\nload=0.01\nfile=0\n")
+	if err != nil || c != 0 || l != 0.01 || len(ff) != 1 || ff[0] {
+		t.Fatalf("stale file: c=%d l=%v ff=%v err=%v (file=0 must parse, not short-read)", c, l, ff, err)
+	}
+	// no file= line at all is NOT a parser error — the file count is the
+	// CALLER's contract (Phase B: zero keep-signals ⇒ zero file= lines is
+	// valid, ssh+load only). The parser returns an empty slice, no error.
+	c, l, ff, err = parseProbeOutput("conns=2\nload=0.41\n")
+	if err != nil || c != 2 || l != 0.41 || len(ff) != 0 {
+		t.Fatalf("no file line: c=%d l=%v ff=%v err=%v (empty slice, no error — count is caller's job)", c, l, ff, err)
+	}
+	// blank/garbage lines (e.g. an ssh banner) are skipped, not fatal
+	c, l, ff, err = parseProbeOutput("Some ssh banner\nconns=1\n\nload=0.5\nfile=1\n")
+	if err != nil || c != 1 || l != 0.5 || len(ff) != 1 || !ff[0] {
+		t.Fatalf("banner skipped: c=%d l=%v ff=%v err=%v", c, l, ff, err)
+	}
+}
+
+// TestParseProbeOutputShortRead: the short-read guard. A missing or
+// unparseable required key is an error (→ unreachable tick), never a
+// silent zero that could read as idle and reap a working box.
+func TestParseProbeOutputShortRead(t *testing.T) {
+	bad := []string{
+		"",                             // empty output
+		"load=0.41\nfile=1\n",           // conns missing
+		"conns=2\nfile=1\n",             // load missing
+		"conns=2\nload=oops\nfile=1\n",   // load unparseable
+		"conns=2\nload=0.41\nfile=yes\n", // file present but unparseable (bad value)
+		"conns=two\nload=0.41\nfile=1\n", // conns unparseable
+		"not key value at all",          // no '=' lines
+	}
+	for _, s := range bad {
+		if _, _, _, err := parseProbeOutput(s); err == nil {
+			t.Errorf("parseProbeOutput(%q) should error (short read → unreachable)", s)
+		}
+	}
+}
+
 // TestReapNeverReturnsError: reapOne must always return nil (bash: "Must
 // end 0"). A non-zero would abort the profile loop and stop reaping every
 // OTHER profile's box while they bill.

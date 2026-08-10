@@ -157,29 +157,86 @@ func newPlaneReapOps(p *profile, prov Provider) *planeReapOps {
 	return &planeReapOps{p: p, prov: prov}
 }
 
-// busyProbe runs the on-box probe (bash: the timeout 30 ssh). Three lines:
-// ssh session count (excluding the control plane), the 1min load, and a
-// recent claude transcript write. A timeout/wedge returns an error
-// (unreachable this tick) — the reaper must never hang on a wedged box.
+// busyProbe runs the on-box probe (bash: the timeout 30 ssh) and parses
+// its key=value output. Three signals today: ssh session count (excluding
+// the control plane), the 1min load, and a recent claude transcript write.
+// A timeout/wedge returns an error (unreachable this tick) — the reaper
+// must never hang on a wedged box.
+//
+// The probe emits one line per signal as key=value (conns=N, load=F,
+// file=0|1), parsed by key in parseProbeOutput — not positionally. The
+// previous positional parser conflated a false third signal (find emits
+// nothing → the line vanished) with a short read (ssh truncated), both
+// looked like len<3, and the false-signal case ticked the box unreachable
+// every quiet tick. Emitting file=0 when stale separates "signal is false"
+// from "probe got cut off", and makes the signal count composable for the
+// per-profile [keep] table (Phase B) without a positional guard to keep
+// in sync.
 func (o *planeReapOps) busyProbe(ip string) (int, float64, bool, error) {
+	probe := `echo "conns=$(ss -Htn state established '( sport = :22 )' | grep -vc '` + o.p.littleboxIP + `')"; ` +
+		`echo "load=$(cut -d' ' -f1 /proc/loadavg)"; ` +
+		`echo "file=$(find /work/state/claude/projects -type f -newermt '-10 minutes' 2>/dev/null | head -1 | grep -c .)"`
 	args := []string{"timeout", "30", "ssh"}
 	args = append(args, sshBoxOpts(o.p)...)
-	args = append(args, o.p.remoteUser+"@"+ip,
-		"ss -Htn state established '( sport = :22 )' | grep -vc '"+
-			o.p.littleboxIP+"' ; cut -d' ' -f1 /proc/loadavg ; find /work/state/claude/projects -type f -newermt '-10 minutes' 2>/dev/null | head -1")
+	args = append(args, o.p.remoteUser+"@"+ip, probe)
 	c := exec.Command(args[0], args[1:]...)
 	out, err := c.Output()
 	if err != nil {
 		return 0, 0, false, err
 	}
-	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
-	if len(lines) < 3 {
-		return 0, 0, false, fmt.Errorf("short probe output")
+	conns, load, fileFresh, perr := parseProbeOutput(string(out))
+	if perr != nil {
+		return 0, 0, false, perr
 	}
-	conns, _ := strconv.Atoi(strings.TrimSpace(lines[0]))
-	load, _ := strconv.ParseFloat(strings.TrimSpace(lines[1]), 64)
-	working := strings.TrimSpace(lines[2]) != ""
-	return conns, load, working, nil
+	if len(fileFresh) != 1 {
+		return 0, 0, false, fmt.Errorf("short probe output: expected 1 file signal, got %d", len(fileFresh))
+	}
+	return conns, load, fileFresh[0], nil
+}
+
+// parseProbeOutput parses the on-box probe's key=value output into its
+// signals. conns and load are required (a missing or unparseable key is a
+// short read → error → unreachable tick — the reaper degrades toward the
+// 1h zombie reap, never toward a 30min idle reap that would kill a working
+// box). All file= values are collected, in order, as freshness booleans;
+// the CALLER validates the count against what it expected (a shortfall is a
+// short read). Pure so the parser is unit-tested without a box or ssh.
+func parseProbeOutput(out string) (conns int, load float64, fileFresh []bool, err error) {
+	var haveConns, haveLoad bool
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		eq := strings.IndexByte(line, '=')
+		if eq <= 0 {
+			continue // not a key=value line (e.g. an ssh banner) — skip
+		}
+		key := line[:eq]
+		val := strings.TrimSpace(line[eq+1:])
+		switch key {
+		case "conns":
+			if conns, err = strconv.Atoi(val); err != nil {
+				return 0, 0, nil, fmt.Errorf("short probe output: bad conns %q", val)
+			}
+			haveConns = true
+		case "load":
+			if load, err = strconv.ParseFloat(val, 64); err != nil {
+				return 0, 0, nil, fmt.Errorf("short probe output: bad load %q", val)
+			}
+			haveLoad = true
+		case "file":
+			n, e := strconv.Atoi(val)
+			if e != nil {
+				return 0, 0, nil, fmt.Errorf("short probe output: bad file %q", val)
+			}
+			fileFresh = append(fileFresh, n > 0)
+		}
+	}
+	if !haveConns || !haveLoad {
+		return 0, 0, nil, fmt.Errorf("short probe output: missing conns or load")
+	}
+	return conns, load, fileFresh, nil
 }
 
 func (o *planeReapOps) down(p *profile) error {
