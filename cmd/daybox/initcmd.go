@@ -330,18 +330,20 @@ func scpTo(src, host, dst string) error {
 	return c.Run()
 }
 
-// pushTree tars the checkout into ~/daybox on the control plane, leaving
-// out .git and local build artifacts (dist/ alone is ~80MB). --no-xattrs:
-// macOS stamps files written by a downloaded binary with a provenance xattr,
-// bsdtar ships xattrs by default, and GNU tar on the far end then warns once
-// per file — the metadata is meaningless off-mac, so drop it at the source.
+// pushTree tars the payload into ~/daybox on the control plane. The payload
+// carries dist/daybox-linux-amd64 (+ the agent copy), so install.sh finds the
+// CLI binary in-tree — only .git and the stray local go-build artifact
+// (cmd/daybox/daybox) are left out. --no-xattrs: macOS stamps files written by
+// a downloaded binary with a provenance xattr, bsdtar ships xattrs by
+// default, and GNU tar on the far end then warns once per file — the metadata
+// is meaningless off-mac, so drop it at the source.
 func pushTree(repo, control string) error {
 	// Retry the whole tar|ssh pair on a transport failure: a blip on the
 	// unpack ssh breaks the pipe (tar then errors too), so both are rebuilt
 	// per attempt — re-tarring is cheap and the unpack overwrites idempotently.
 	return sshRetry("control plane", func() error {
 		tar := exec.Command("tar", "-C", repo, "--no-xattrs",
-			"--exclude=./.git", "--exclude=./dist", "--exclude=./cmd/daybox/daybox",
+			"--exclude=./.git", "--exclude=./cmd/daybox/daybox",
 			"-czf", "-", ".")
 		unpack := exec.Command("ssh", append(sshOpts(true), control,
 			"mkdir -p ~/daybox && tar -xzf - -C ~/daybox")...)

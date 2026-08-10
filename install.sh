@@ -49,9 +49,10 @@ Linux)
     # repo tree stays; only the entry-point binary changes.
     BIN="$REPO/dist/daybox-linux-amd64"
     if [ ! -f "$BIN" ]; then
-        # a repo checked out on the plane (init pushTree) has no dist/; the
-        # signed upgrade path installs the binary there. For a from-source
-        # install, build it first: cmd/daybox/build.sh.
+        # the release payload (init pushTree / upgrade replaceTree) ships
+        # dist/daybox-linux-amd64 in-tree, so a signed install finds it here.
+        # A from-source checkout has no dist/ — build it first:
+        # cmd/daybox/build.sh.
         echo "  no binary at $BIN — build it first: cmd/daybox/build.sh" >&2
         exit 1
     fi

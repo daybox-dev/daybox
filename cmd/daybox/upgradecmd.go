@@ -163,7 +163,7 @@ func remoteAgentVersion(control string) string {
 func replaceTree(repo, control string) error {
 	return sshRetry("control plane", func() error {
 		tar := exec.Command("tar", "-C", repo, "--no-xattrs",
-			"--exclude=./.git", "--exclude=./dist", "--exclude=./cmd/daybox/daybox",
+			"--exclude=./.git", "--exclude=./cmd/daybox/daybox",
 			"-czf", "-", ".")
 		unpack := exec.Command("ssh", append(sshOpts(true), control,
 			"rm -rf ~/daybox.new && mkdir -p ~/daybox.new && tar -xzf - -C ~/daybox.new && "+
