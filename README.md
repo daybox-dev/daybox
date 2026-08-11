@@ -190,14 +190,23 @@ signal.
 
 ### Keep-signals — what keeps a detached box alive
 
-A per-profile sidecar `~/.config/daybox/profiles/<name>/keep.toml` declares
-file-freshness keep-signals — paths whose recent modification means the box
-is in use, even with no ssh session and near-zero load (a detached agent,
-a long build, a dev server). OR semantics: the box is kept if **any**
-declared path has a file with an mtime within its `within` window.
+A box's keep.toml declares file-freshness keep-signals — paths whose
+recent modification means the box is in use, even with no ssh session and
+near-zero load (a detached agent, a long build, a dev server). OR
+semantics: the box is kept if **any** declared path has a file with an
+mtime within its `within` window.
+
+`keep.toml` lives on the box's persistent `/work` volume
+(`/work/state/daybox/keep.toml`) — the box owns its own liveness
+declaration. It's writable by the box (a long script can point the reaper
+at a file it touches) **and** by you from the laptop:
+
+```sh
+daybox keep edit [-p prof]   # fetch the box's keep.toml, open $EDITOR, push back
+```
 
 ```toml
-# ~/.config/daybox/profiles/<name>/keep.toml
+# /work/state/daybox/keep.toml (on the box)
 [[files]]
 path   = "/work/state/claude/projects"   # absolute; volume-relative in practice
 within = "10m"                            # fresh if a file's mtime is within this
@@ -207,15 +216,21 @@ path   = "/work/state/pi/.pi/agent/sessions"
 within = "10m"
 ```
 
-No default `keep.toml` is shipped. An absent file means the reaper relies on
-ssh conns + load only (the safe baseline); a detached agent doing bursty
-API-bound work is no longer protected by default — declare the path it
-writes to. The hard lifetime cap (`MAX_LIFETIME_HOURS`) bounds spend no
-matter how generous the keep-signals are. Paths must be absolute and
-contain no shell metacharacters; a bad entry is logged and skipped
-(degrade to ignoring that signal, never to keeping the box forever).
-`keep.toml` is live-editable on the control plane and takes effect on the
-next reaper tick — not the next summon.
+No approval is needed for a box to edit its own keep — keep can only
+*delay* a reap, never run code or persist identity, so the plane-side
+caps bound the spend: `MAX_LIFETIME_HOURS` (default 12) force-reaps
+regardless of activity, and `REAP_AFTER_UNREACHABLE_MIN` (default 60)
+force-reaps a box whose probe times out (a box sabotaging its own keep
+makes its own probe slow → self-reaps). A box cannot raise these caps.
+
+A fresh box starts with an empty `keep.toml` (ssh+load only — the safe
+baseline); declare the path your workflow writes to. Paths must be
+absolute and contain no shell metacharacters; a bad entry is logged and
+skipped (degrade to ignoring that signal, never to keeping the box
+forever). Edits take effect on the next reaper tick (5min) — not the next
+summon. The box evaluates its own keep (the reaper ssh-runs
+`daybox-agent keep-probe`, which reads the volume's keep.toml and emits
+the signal results); the plane never loads keep.toml.
 
 ### The net
 
@@ -286,6 +301,9 @@ daybox profile ls                  # each profile: box up/down, hourly burn, vol
 daybox profile use <name>          # set the profile bare commands resolve to
 daybox profile rename <old> <new>  # (box must be down)
 daybox profile rm <name> [--purge] # reap box; keep the volume unless --purge
+daybox profile edit [name]         # edit a profile's seed in $EDITOR (validated, applied next up)
+daybox profile proposals           # review box-proposed seed changes (accept <id> | reject <id>)
+daybox keep edit [-p prof]        # edit the box's keep.toml in $EDITOR (takes effect next reaper tick)
 
 daybox up   -p <name> [type]       # -p is a flag; the positional stays the server type
 daybox ssh  -p <name>
@@ -362,6 +380,18 @@ prints the failing step and exits non-zero, and the box is left running so you
 can `daybox ssh` in and look. A box that came up missing what you declared,
 while reporting success, is the failure this design exists to prevent.
 
+**Box-proposed changes (default-on).** A box can't edit its own seed — the
+seed is root-at-boot, and a writable one would launder machine-persistence
+through provisioning. But a box legitimately *discovers* drift (a tool
+installed mid-session, a pin that lags what's running), so it can submit a
+**proposal**: the control plane's relay (a default-on, net-side daemon)
+stages it as an inert file, and you review a full diff on the laptop
+(`daybox profile proposals` → `accept <id>` / `reject <id>`) with
+`[setup]`/`[persist]` lines flagged. The box proposes; only your laptop
+approves. An accepted change takes effect at the next `down` + `up`.
+`daybox up` offers a non-blocking review before each summon when proposals
+are pending.
+
 ### State inventory
 
 | Where | What |
@@ -396,6 +426,7 @@ required; everything else has a default baked into the tooling.
 | `VOLUME_SIZE_GB` | `50` | Workspace volume size. |
 | `REMOTE_USER` | `dev` | Login user created on the big box. |
 | `REAP_AFTER_IDLE_MIN` | `30` | Delete after this long with no ssh + low load. |
+| `REAP_AFTER_UNREACHABLE_MIN` | `60` | Force-reap a box whose probe times out (a box sabotaging its own keep self-reaps on this clock). |
 | `LOAD_BUSY` | `0.40` | 1-min loadavg at/above this counts as busy. |
 | *(profile seed)* | — | What the box carries is **not** a config key — see [Profile seeds](#profile-seeds--what-a-box-carries). |
 | `MAX_LIFETIME_HOURS` | `12` | Hard cap: a box older than this is reaped **even if busy**. The runaway backstop — see below. `0` disables it. |
