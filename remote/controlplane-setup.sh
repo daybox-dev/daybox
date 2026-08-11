@@ -120,4 +120,28 @@ if ! sudo headscale users list -o json | jq -e --arg u "$NET_USER" \
     sudo headscale users create "$NET_USER"
 fi
 
+# The relay + reaper run as user systemd services and reach headscale via
+# its unix socket (/var/run/headscale/headscale.sock, mode 0770, group
+# headscale). The user systemd manager freezes its supplementary groups at
+# start, so if it predates the usermod above — a fresh install, or a
+# manager started before the user joined the headscale group — its
+# services can't open the socket. The relay then crash-loops on first
+# start (relaySelfEnroll runs `headscale users list`); the reaper's
+# net-node drop silently fails and leaves ghost nodes (the 2026-08-10
+# stale-node gotcha, now traced here). Heal it once: if the running
+# manager lacks the group, restart it so its services inherit it.
+# install.sh already enabled the relay; Restart=on-failure brings it back
+# healthy as soon as the manager has the group. Safe over ssh:
+# controlplane-setup runs under the system sshd session, not user@, so
+# restarting the user manager doesn't kill this script.
+HS_GID=$(getent group headscale 2>/dev/null | cut -d: -f3) || HS_GID=""
+if [ -n "$HS_GID" ]; then
+    UM_PID=$(pgrep -u "$(id -u)" -x systemd | head -1 || true)
+    if [ -n "$UM_PID" ] && ! awk '/^Groups:/{for(i=2;i<=NF;i++) print $i}' \
+            /proc/"$UM_PID"/status | grep -qx "$HS_GID"; then
+        log "restarting user@$(id -u) so the relay/reaper inherit the headscale group"
+        sudo systemctl restart "user@$(id -u).service"
+    fi
+fi
+
 log "control plane ready"
