@@ -124,6 +124,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		cmdStatus(c)
 	case "reap":
 		cmdReap(c)
+	case "keep-probe":
+		cmdKeepProbe(c)
 	case "setup":
 		cmdSetup(c)
 	case "profile":
