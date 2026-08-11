@@ -194,66 +194,29 @@ func newPlaneReapOps(p *profile, prov Provider) *planeReapOps {
 	return &planeReapOps{p: p, prov: prov}
 }
 
-// busyProbe runs the on-box probe (bash: the timeout 30 ssh) and parses
-// its key=value output. Two fixed signals — ssh session count (excluding
-// the control plane) and the 1min load — plus one file= signal per declared
-// [keep] entry. A timeout/wedge returns an error (unreachable this tick) —
-// the reaper must never hang on a wedged box.
+// busyProbe ssh-runs `daybox-agent keep-probe <planeIP>` on the box and
+// parses its key=value output. The box owns its keep.toml now (it lives
+// on the /work volume), so the box is the authority on its own
+// file-freshness signals — the plane no longer loads keep.toml, knows the
+// entry count, or builds the probe string. A timeout/wedge returns an
+// error (unreachable this tick) — the reaper must never hang on a box.
 //
-// The probe emits one line per signal as key=value (conns=N, load=F,
-// file=0|1 per keep entry), parsed by key in parseProbeOutput — not
-// positionally. file=0 when stale (not an absent line) separates "signal
-// is false" from "probe got cut off". With zero [keep] entries the probe
-// emits no file= lines and the box is judged on ssh+load only (the safe
-// baseline). The short-read guard: conns+load required, and exactly
-// len(keep) file= lines required; a shortfall is an error → unreachable
-// tick → 1h zombie reap, never a 30min idle reap that would kill a
-// working box.
-//
-// The hardcoded /work/state/claude/projects path this replaced was the
-// single-tool limitation: a pi user, a build, a dev server had no
-// equivalent signal. It is now user-declared per profile in keep.toml.
+// The 30s timeout is the keep-DoS bound: a box that bombs its own keep
+// makes its own probe slow → unreachable tick → self-reaps on
+// REAP_AFTER_UNREACHABLE_MIN. The plane passes its IP as the arg so the
+// ssh self-exclusion (this probe's session counts as a :22 conn) stays
+// exact without the box mirroring plane-side config. See keepprobe.go.
 func (o *planeReapOps) busyProbe(ip string) (int, float64, []fileSignalResult, error) {
-	var probe strings.Builder
-	probe.WriteString(`echo "conns=$(ss -Htn state established '( sport = :22 )' | grep -vc '`)
-	probe.WriteString(o.p.littleboxIP)
-	probe.WriteString(`')"; echo "load=$(cut -d' ' -f1 /proc/loadavg)"`)
-	for _, k := range o.p.keep {
-		// ceil(within / 1min), floored at 1. The reaper ticks every 5min,
-		// so sub-5min windows are misleading but not forbidden — the
-		// lifetime cap is the hard bound either way (design lean: don't
-		// enforce a floor, document it).
-		mins := int(k.within / time.Minute)
-		if k.within%time.Minute != 0 {
-			mins++
-		}
-		if mins < 1 {
-			mins = 1
-		}
-		probe.WriteString(`; echo "file=$(find `)
-		probe.WriteString(shq(k.path)) // single-quoted; keepPathRe already rejected shell-unsafe
-		probe.WriteString(` -type f -newermt '-`)
-		probe.WriteString(strconv.Itoa(mins))
-		probe.WriteString(` minutes' 2>/dev/null | head -1 | grep -c .)"`)
-	}
 	args := []string{"timeout", "30", "ssh"}
 	args = append(args, sshBoxOpts(o.p)...)
-	args = append(args, o.p.remoteUser+"@"+ip, probe.String())
-	c := exec.Command(args[0], args[1:]...)
-	out, err := c.Output()
+	args = append(args, o.p.remoteUser+"@"+ip, "/usr/local/bin/daybox-agent keep-probe "+o.p.littleboxIP)
+	out, err := exec.Command(args[0], args[1:]...).Output()
 	if err != nil {
 		return 0, 0, nil, err
 	}
-	conns, load, fileVals, perr := parseProbeOutput(string(out))
+	conns, load, files, perr := parseProbeOutput(string(out))
 	if perr != nil {
 		return 0, 0, nil, perr
-	}
-	if len(fileVals) != len(o.p.keep) {
-		return 0, 0, nil, fmt.Errorf("short probe output: expected %d file signals, got %d", len(o.p.keep), len(fileVals))
-	}
-	files := make([]fileSignalResult, len(o.p.keep))
-	for i, k := range o.p.keep {
-		files[i] = fileSignalResult{path: k.path, fresh: fileVals[i]}
 	}
 	return conns, load, files, nil
 }
@@ -261,11 +224,13 @@ func (o *planeReapOps) busyProbe(ip string) (int, float64, []fileSignalResult, e
 // parseProbeOutput parses the on-box probe's key=value output into its
 // signals. conns and load are required (a missing or unparseable key is a
 // short read → error → unreachable tick — the reaper degrades toward the
-// 1h zombie reap, never toward a 30min idle reap that would kill a working
-// box). All file= values are collected, in order, as freshness booleans;
-// the CALLER validates the count against what it expected (a shortfall is a
-// short read). Pure so the parser is unit-tested without a box or ssh.
-func parseProbeOutput(out string) (conns int, load float64, fileFresh []bool, err error) {
+// zombie reap, never toward an idle reap that would kill a working box).
+// Each file=<path>=0|1 line becomes a fileSignalResult (path + fresh), in
+// declared order, so the caller can log WHICH signal kept the box and
+// status can surface the active set. A short read (ssh truncated) has no
+// conns/load → error → unreachable tick. Pure so the parser is unit-tested
+// without a box or ssh.
+func parseProbeOutput(out string) (conns int, load float64, files []fileSignalResult, err error) {
 	var haveConns, haveLoad bool
 	for _, line := range strings.Split(out, "\n") {
 		line = strings.TrimSpace(line)
@@ -277,30 +242,36 @@ func parseProbeOutput(out string) (conns int, load float64, fileFresh []bool, er
 			continue // not a key=value line (e.g. an ssh banner) — skip
 		}
 		key := line[:eq]
-		val := strings.TrimSpace(line[eq+1:])
+		rest := strings.TrimSpace(line[eq+1:])
 		switch key {
 		case "conns":
-			if conns, err = strconv.Atoi(val); err != nil {
-				return 0, 0, nil, fmt.Errorf("short probe output: bad conns %q", val)
+			if conns, err = strconv.Atoi(rest); err != nil {
+				return 0, 0, nil, fmt.Errorf("short probe output: bad conns %q", rest)
 			}
 			haveConns = true
 		case "load":
-			if load, err = strconv.ParseFloat(val, 64); err != nil {
-				return 0, 0, nil, fmt.Errorf("short probe output: bad load %q", val)
+			if load, err = strconv.ParseFloat(rest, 64); err != nil {
+				return 0, 0, nil, fmt.Errorf("short probe output: bad load %q", rest)
 			}
 			haveLoad = true
 		case "file":
-			n, e := strconv.Atoi(val)
-			if e != nil {
-				return 0, 0, nil, fmt.Errorf("short probe output: bad file %q", val)
+			// file=<path>=0|1 — the path is between the first and last '='
+			// (keepPathRe rejects '=' in paths, so this is unambiguous).
+			lastEq := strings.LastIndexByte(rest, '=')
+			if lastEq < 0 {
+				return 0, 0, nil, fmt.Errorf("short probe output: bad file %q", rest)
 			}
-			fileFresh = append(fileFresh, n > 0)
+			n, e := strconv.Atoi(rest[lastEq+1:])
+			if e != nil {
+				return 0, 0, nil, fmt.Errorf("short probe output: bad file %q", rest)
+			}
+			files = append(files, fileSignalResult{path: rest[:lastEq], fresh: n > 0})
 		}
 	}
 	if !haveConns || !haveLoad {
 		return 0, 0, nil, fmt.Errorf("short probe output: missing conns or load")
 	}
-	return conns, load, fileFresh, nil
+	return conns, load, files, nil
 }
 
 func (o *planeReapOps) down(p *profile) error {

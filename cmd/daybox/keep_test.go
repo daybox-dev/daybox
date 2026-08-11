@@ -29,14 +29,11 @@ func TestLoadKeepTomlAbsentIsEmpty(t *testing.T) {
 	if got := loadKeepToml(filepath.Join(d.confDir, "profiles", "default", "keep.toml")); len(got) != 0 {
 		t.Errorf("absent keep.toml -> %v, want empty", got)
 	}
-	// and deriveProfile must not fail on an absent keep.toml
+	// deriveProfile succeeds with an absent keep.toml (keep is no longer a
+	// profile field — the box loads it on-box at probe time).
 	writeConfig(t, d, "LITTLEBOX_IP=10.0.0.1\n")
-	p, err := d.deriveProfile("default")
-	if err != nil {
+	if _, err := d.deriveProfile("default"); err != nil {
 		t.Fatalf("deriveProfile with absent keep.toml: %v", err)
-	}
-	if len(p.keep) != 0 {
-		t.Errorf("p.keep = %v, want empty", p.keep)
 	}
 }
 
@@ -60,15 +57,6 @@ within = "5m"
 	}
 	if got[1].path != "/work/state/pi/.pi/agent/sessions" || got[1].within != 5*time.Minute {
 		t.Errorf("entry 1 = %+v", got[1])
-	}
-	// deriveProfile carries them through
-	writeConfig(t, d, "LITTLEBOX_IP=10.0.0.1\n")
-	p, err := d.deriveProfile("default")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(p.keep) != 2 {
-		t.Errorf("p.keep = %d signals, want 2", len(p.keep))
 	}
 }
 

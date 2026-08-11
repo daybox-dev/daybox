@@ -259,32 +259,42 @@ func loadBusyNaN() float64 {
 	return zero / zero // NaN
 }
 
-// parseProbeOutput (Phase A): the key=value probe parser. Replaces the
-// positional 3-line split. The invariant it preserves: a short or
-// malformed read is an error → unreachable tick, never silently idle.
+// parseProbeOutput: the key=value probe parser. The invariant it
+// preserves: a short or malformed read is an error → unreachable tick,
+// never silently idle. file lines are path-bearing (file=<path>=0|1) so
+// the caller can log WHICH signal kept the box.
 func TestParseProbeOutput(t *testing.T) {
 	// well-formed, all three signals present, file fresh
-	c, l, ff, err := parseProbeOutput("conns=2\nload=0.41\nfile=1\n")
-	if err != nil || c != 2 || l != 0.41 || len(ff) != 1 || !ff[0] {
-		t.Fatalf("good output: c=%d l=%v ff=%v err=%v", c, l, ff, err)
+	c, l, ff, err := parseProbeOutput("conns=2\nload=0.41\nfile=/work/state/claude/projects=1\n")
+	if err != nil || c != 2 || l != 0.41 || len(ff) != 1 || !ff[0].fresh {
+		t.Fatalf("good output: c=%d l=%v ff=%+v err=%v", c, l, ff, err)
 	}
-	// file=0 (stale) is a PRESENT line — not a short read. This is the bug
-	// fix: the old positional parser saw len<3 when find emitted nothing.
-	c, l, ff, err = parseProbeOutput("conns=0\nload=0.01\nfile=0\n")
-	if err != nil || c != 0 || l != 0.01 || len(ff) != 1 || ff[0] {
-		t.Fatalf("stale file: c=%d l=%v ff=%v err=%v (file=0 must parse, not short-read)", c, l, ff, err)
+	if ff[0].path != "/work/state/claude/projects" {
+		t.Errorf("path lost: got %q", ff[0].path)
+	}
+	// file=<path>=0 (stale) is a PRESENT line — not a short read. This is
+	// the bug fix: the old positional parser saw len<3 when find emitted
+	// nothing.
+	c, l, ff, err = parseProbeOutput("conns=0\nload=0.01\nfile=/tmp/watched=0\n")
+	if err != nil || c != 0 || l != 0.01 || len(ff) != 1 || ff[0].fresh {
+		t.Fatalf("stale file: c=%d l=%v ff=%+v err=%v (file=0 must parse, not short-read)", c, l, ff, err)
 	}
 	// no file= line at all is NOT a parser error — the file count is the
-	// CALLER's contract (Phase B: zero keep-signals ⇒ zero file= lines is
-	// valid, ssh+load only). The parser returns an empty slice, no error.
+	// box's contract (zero keep-signals ⇒ zero file= lines is valid,
+	// ssh+load only). The parser returns an empty slice, no error.
 	c, l, ff, err = parseProbeOutput("conns=2\nload=0.41\n")
 	if err != nil || c != 2 || l != 0.41 || len(ff) != 0 {
-		t.Fatalf("no file line: c=%d l=%v ff=%v err=%v (empty slice, no error — count is caller's job)", c, l, ff, err)
+		t.Fatalf("no file line: c=%d l=%v ff=%+v err=%v (empty slice, no error)", c, l, ff, err)
 	}
 	// blank/garbage lines (e.g. an ssh banner) are skipped, not fatal
-	c, l, ff, err = parseProbeOutput("Some ssh banner\nconns=1\n\nload=0.5\nfile=1\n")
-	if err != nil || c != 1 || l != 0.5 || len(ff) != 1 || !ff[0] {
-		t.Fatalf("banner skipped: c=%d l=%v ff=%v err=%v", c, l, ff, err)
+	c, l, ff, err = parseProbeOutput("Some ssh banner\nconns=1\n\nload=0.5\nfile=/x=1\n")
+	if err != nil || c != 1 || l != 0.5 || len(ff) != 1 || !ff[0].fresh {
+		t.Fatalf("banner skipped: c=%d l=%v ff=%+v err=%v", c, l, ff, err)
+	}
+	// multiple file= lines preserve order + per-signal freshness
+	c, l, ff, err = parseProbeOutput("conns=1\nload=0.2\nfile=/a=0\nfile=/b=1\n")
+	if err != nil || len(ff) != 2 || ff[0].fresh || !ff[1].fresh || ff[0].path != "/a" || ff[1].path != "/b" {
+		t.Fatalf("multiple: c=%d l=%v ff=%+v err=%v", c, l, ff, err)
 	}
 }
 
@@ -293,13 +303,14 @@ func TestParseProbeOutput(t *testing.T) {
 // silent zero that could read as idle and reap a working box.
 func TestParseProbeOutputShortRead(t *testing.T) {
 	bad := []string{
-		"",                               // empty output
-		"load=0.41\nfile=1\n",            // conns missing
-		"conns=2\nfile=1\n",              // load missing
-		"conns=2\nload=oops\nfile=1\n",   // load unparseable
-		"conns=2\nload=0.41\nfile=yes\n", // file present but unparseable (bad value)
-		"conns=two\nload=0.41\nfile=1\n", // conns unparseable
-		"not key value at all",           // no '=' lines
+		"",                                   // empty output
+		"load=0.41\nfile=/p=1\n",             // conns missing
+		"conns=2\nfile=/p=1\n",               // load missing
+		"conns=2\nload=oops\nfile=/p=1\n",    // load unparseable
+		"conns=2\nload=0.41\nfile=/p=yes\n",  // file present but unparseable (bad value)
+		"conns=two\nload=0.41\nfile=/p=1\n",  // conns unparseable
+		"conns=2\nload=0.41\nfile=novalue\n", // file line with no '=' value
+		"not key value at all",               // no '=' lines
 	}
 	for _, s := range bad {
 		if _, _, _, err := parseProbeOutput(s); err == nil {

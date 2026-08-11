@@ -31,9 +31,12 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/BurntSushi/toml"
 )
 
 // keepTomlPath is where a box's keep.toml lives — on the persistent /work
@@ -163,3 +166,80 @@ func (realKeepProbeEnv) fresh(path string, withinMin int) (bool, error) {
 	n, _ := strconv.Atoi(strings.TrimSpace(string(out)))
 	return n > 0, nil
 }
+
+// --- keep.toml loading (moved here from profile.go: keep is a BOX concept
+// now, not a profile one — the box owns its keep.toml on /work) ---
+
+// keepSignal is one user-declared file-freshness signal from keep.toml.
+// The reaper keeps the box if any signal's path has a file with mtime
+// within `within`. path is shell-validated at load; within is parsed
+// from a duration string ("10m") via time.ParseDuration.
+type keepSignal struct {
+	path   string
+	within time.Duration
+}
+
+// keepFileEntry is the TOML decode shape for one [[files]] entry. within
+// is decoded as a STRING and parsed per-entry with time.ParseDuration —
+// decoding it as a bare time.Duration makes one bad value ("not-a-duration")
+// fail the WHOLE file's decode, so a single typo would drop every signal.
+// A string per-entry lets one bad within degrade just that entry.
+type keepFileEntry struct {
+	Path   string `toml:"path"`
+	Within string `toml:"within"` // "10m" → parsed below
+}
+
+// loadKeepToml reads a keep.toml. NEVER returns a hard error: keep.toml is
+// a REAPER input only, and a hard error would make the caller skip the
+// whole profile (box bills until the lifetime cap) — the more expensive
+// failure. Instead:
+//   - absent file → nil (the safe ssh+load baseline)
+//   - structurally invalid TOML → log + nil (reap on ssh+load + cap)
+//   - a bad entry (non-absolute path, shell-unsafe char, bad within) →
+//     log + skip THAT entry (degrade to ignoring that signal, never to
+//     keeping the box forever). The good entries in the same file still
+//     fire. A non-existent path on the box is not an error here — it
+//     surfaces as file=0 (not fresh) at probe time.
+func loadKeepToml(path string) []keepSignal {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			say("[keep] could not read %s: %v — ignoring file-signals (ssh+load only)", path, err)
+		}
+		return nil
+	}
+	var doc struct {
+		Files []keepFileEntry `toml:"files"`
+	}
+	if _, err := toml.Decode(string(b), &doc); err != nil {
+		say("[keep] %s is not valid TOML: %v — ignoring all file-signals (ssh+load only)", path, err)
+		return nil
+	}
+	var out []keepSignal
+	for _, f := range doc.Files {
+		if !keepPathRe.MatchString(f.Path) {
+			say("[keep] skipping invalid path %q (must be absolute, no shell metachars)", f.Path)
+			continue
+		}
+		if f.Within == "" {
+			say("[keep] skipping %s: missing within (e.g. within = \"10m\")", f.Path)
+			continue
+		}
+		dur, err := time.ParseDuration(f.Within)
+		if err != nil {
+			say("[keep] skipping invalid within %q for %s (must be a duration like 10m)", f.Within, f.Path)
+			continue
+		}
+		if dur <= 0 {
+			say("[keep] skipping non-positive within %v for %s", dur, f.Path)
+			continue
+		}
+		out = append(out, keepSignal{path: f.Path, within: dur})
+	}
+	return out
+}
+
+// keepPathRe validates a keep [[files]] path: absolute, and the only
+// shell-safe charset (letters, digits, dot, underscore, slash, hyphen).
+// A bad entry is logged + skipped at load, never keep-forever.
+var keepPathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
