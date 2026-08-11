@@ -66,13 +66,12 @@ Linux)
     mkdir -p "$HOME/.config/systemd/user"
     cp "$REPO/systemd/daybox-reaper.service" "$HOME/.config/systemd/user/"
     cp "$REPO/systemd/daybox-reaper.timer"   "$HOME/.config/systemd/user/"
-    # installed but NOT enabled: running a resident daemon on the plane is a
-    # deliberate operator step (see the unit's posture note + SECURITY.md)
     cp "$REPO/systemd/daybox-relay.service"  "$HOME/.config/systemd/user/"
     systemctl --user daemon-reload
     systemctl --user enable --now daybox-reaper.timer
     echo "  reaper timer enabled (runs 'daybox reap' every 5min)"
-    echo "  relay unit installed, not enabled (opt-in: systemctl --user enable --now daybox-relay)"
+    systemctl --user enable --now daybox-relay
+    echo "  relay enabled (box-proposed seed changes: a box proposes, the laptop accepts)"
 
     echo "[install] done."
     if [ ! -f "$HOME/.config/daybox/config.local" ]; then

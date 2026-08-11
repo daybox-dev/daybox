@@ -6,9 +6,14 @@
 # The relay listens ONLY on the private net (a tsnet node, no public
 # listener), authenticates callers by net identity (WhoIs), and can do one
 # thing: stage an inert proposal file for the laptop to review. It never
-# applies anything. Enabling it is a deliberate step, not part of setup:
-#   systemctl --user enable --now daybox-relay
-# First start self-enrolls on the net (it runs next to headscale).
+# applies anything.
+#
+# Default-on (install.sh enables it): a box proposing seed changes is a
+# default daybox capability now — a box can propose, the laptop accepts.
+# keep does NOT use the relay (keep is box-writable on the /work volume,
+# no approval — it can only delay a reap and the plane-side caps bound the
+# spend); the relay is for the seed, the thing with authority that warrants
+# the human gate. First start self-enrolls on the net (next to headscale).
 [Unit]
 Description=daybox agent relay (net-side proposal intake; the laptop approves)
 After=network-online.target
