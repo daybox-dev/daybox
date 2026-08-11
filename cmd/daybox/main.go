@@ -45,6 +45,7 @@ everyday:
   profile edit [name]  edit a profile's seed in $EDITOR (validated, applied next up)
   profile proposals    review box-proposed seed changes (accept <id> | reject <id>)
   profile propose      (on a box) propose detected tool/package drift to the profile
+  keep edit [-p prof] edit the box's keep.toml in $EDITOR (takes effect next reaper tick)
 
 setup:
   init             set up (or adopt) a control plane + enroll this device
@@ -124,6 +125,8 @@ func run(args []string, stdout, stderr io.Writer) int {
 		cmdStatus(c)
 	case "reap":
 		cmdReap(c)
+	case "keep":
+		cmdKeep(c)
 	case "keep-probe":
 		cmdKeepProbe(c)
 	case "setup":
