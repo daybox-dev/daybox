@@ -66,18 +66,19 @@ type profile struct {
 	knownHosts   string // profileState/known_hosts
 
 	// per-profile knobs (layered: deployment baseline + profile overlay)
-	provider         string
-	serverType       string
-	image            string
-	location         string
-	volumeSizeGB     int
-	remoteUser       string
-	reapAfterIdleMin int
-	loadBusy         float64
-	maxLifetimeHours int
-	netUser          string
-	gitName          string
-	gitEmail         string
+	provider                string
+	serverType              string
+	image                   string
+	location                string
+	volumeSizeGB            int
+	remoteUser              string
+	reapAfterIdleMin        int
+	loadBusy                float64
+	maxLifetimeHours        int
+	reapAfterUnreachableMin int
+	netUser                 string
+	gitName                 string
+	gitEmail                string
 
 	// keep is the profile's user-declared file-freshness keep-signals
 	// from keep.toml — the reaper keeps the box if ANY declared path has
@@ -98,6 +99,7 @@ type profile struct {
 var profileKnobs = []string{
 	"PROVIDER", "SERVER_TYPE", "IMAGE", "LOCATION", "VOLUME_SIZE_GB",
 	"REMOTE_USER", "REAP_AFTER_IDLE_MIN", "LOAD_BUSY", "MAX_LIFETIME_HOURS",
+	"REAP_AFTER_UNREACHABLE_MIN",
 	"NET_USER", "GIT_NAME", "GIT_EMAIL",
 }
 
@@ -160,6 +162,10 @@ func (d *deployment) deriveProfile(name string) (*profile, error) {
 	if err != nil {
 		return nil, err
 	}
+	p.reapAfterUnreachableMin, err = atoiDefault(get("REAP_AFTER_UNREACHABLE_MIN"), defaultReapAfterUnreachableMin)
+	if err != nil {
+		return nil, err
+	}
 	p.loadBusy, err = atofDefault(get("LOAD_BUSY"), defaultLoadBusy)
 	if err != nil {
 		return nil, err
@@ -208,9 +214,11 @@ func (p *profile) seedFile() string {
 	return filepath.Join(p.dep.confDir, "profiles", p.name, "profile.toml")
 }
 
-func (p *profile) volumeIDFile() string    { return filepath.Join(p.profileState, "volume_id") }
-func (p *profile) idleTicksFile() string   { return filepath.Join(p.profileState, "idle_ticks") }
-func (p *profile) unreachTicksFile() string { return filepath.Join(p.profileState, "unreachable_ticks") }
+func (p *profile) volumeIDFile() string  { return filepath.Join(p.profileState, "volume_id") }
+func (p *profile) idleTicksFile() string { return filepath.Join(p.profileState, "idle_ticks") }
+func (p *profile) unreachTicksFile() string {
+	return filepath.Join(p.profileState, "unreachable_ticks")
+}
 func (p *profile) agentVersionFile() string { return filepath.Join(p.profileState, "agent_version") }
 
 // keepTomlFile is the per-profile file-freshness sidecar: a box is kept if
@@ -347,8 +355,8 @@ func amPlane() bool { return loadConfig().controlHost() == "" }
 // REMOTE_USER must be a plain unix username (it reaches a root shell, a
 // remote ssh command line, and the firewall YAML).
 var (
-	ipv4Re   = regexp.MustCompile(`^[0-9]{1,3}(\.[0-9]{1,3}){3}$`)
-	unameRe  = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	ipv4Re     = regexp.MustCompile(`^[0-9]{1,3}(\.[0-9]{1,3}){3}$`)
+	unameRe    = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
 	keepPathRe = regexp.MustCompile(`^/[A-Za-z0-9._/-]+$`)
 )
 
@@ -388,17 +396,18 @@ func (d *deployment) loadProvider(name string) (Provider, error) {
 
 // deployment-wide defaults (bash: the `: "${VAR:=default}` block).
 const (
-	defaultProvider        = "hetzner"
-	defaultServerType      = "ccx33"
-	defaultImage           = "ubuntu-24.04"
-	defaultLocation        = "hil"
-	defaultVolumeSizeGB    = 50
-	defaultRemoteUser      = "dev"
-	defaultReapAfterIdleMin = 30
-	defaultLoadBusy        = 0.40
-	defaultMaxLifetimeHours = 12
-	defaultNetUser         = "dev"
-	defaultNetPort         = 8080
+	defaultProvider                = "hetzner"
+	defaultServerType              = "ccx33"
+	defaultImage                   = "ubuntu-24.04"
+	defaultLocation                = "hil"
+	defaultVolumeSizeGB            = 50
+	defaultRemoteUser              = "dev"
+	defaultReapAfterIdleMin        = 30
+	defaultLoadBusy                = 0.40
+	defaultMaxLifetimeHours        = 12
+	defaultReapAfterUnreachableMin = 60
+	defaultNetUser                 = "dev"
+	defaultNetPort                 = 8080
 )
 
 // --- small config helpers ---

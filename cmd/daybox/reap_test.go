@@ -62,30 +62,30 @@ func probeServer(ageMin int, running bool) *Server {
 	return &Server{
 		ID: "99", Name: "daybox-default", IP: "5.78.0.1", Status: "running",
 		Created: time.Now().Add(-time.Duration(ageMin) * time.Minute).Format(time.RFC3339),
-		Type: "ccx33",
+		Type:    "ccx33",
 	}
 }
 
 // a minimal provider stub that returns a scripted probe result.
 type reapProvider struct{ probe *Server }
 
-func (r *reapProvider) Name() string            { return "hetzner" }
-func (r *reapProvider) HasCredentials() bool     { return true }
-func (r *reapProvider) CheckCredentials() error  { return nil }
-func (r *reapProvider) PrepareSSHKeys(string) error { return nil }
+func (r *reapProvider) Name() string                  { return "hetzner" }
+func (r *reapProvider) HasCredentials() bool          { return true }
+func (r *reapProvider) CheckCredentials() error       { return nil }
+func (r *reapProvider) PrepareSSHKeys(string) error   { return nil }
 func (r *reapProvider) Probe(string) (*Server, error) { return r.probe, nil }
 func (r *reapProvider) Summon(string, string, string, string, string, string) (Server, error) {
 	return Server{}, nil
 }
-func (r *reapProvider) Reap(string) error             { return nil }
+func (r *reapProvider) Reap(string) error                                { return nil }
 func (r *reapProvider) VolumeEnsure(string, int, string) (string, error) { return "1", nil }
-func (r *reapProvider) VolumeAttachedTo(string) (string, error) { return "", nil }
-func (r *reapProvider) VolumeDetach(string) error    { return nil }
-func (r *reapProvider) VolumeSize(string) (int, error) { return 50, nil }
-func (r *reapProvider) VolumeRename(string, string) error { return nil }
-func (r *reapProvider) VolumeDelete(string) error    { return nil }
-func (r *reapProvider) UserDataMaxBytes() int        { return 32768 }
-func (r *reapProvider) PriceHourly(string, string) string { return "" }
+func (r *reapProvider) VolumeAttachedTo(string) (string, error)          { return "", nil }
+func (r *reapProvider) VolumeDetach(string) error                        { return nil }
+func (r *reapProvider) VolumeSize(string) (int, error)                   { return 50, nil }
+func (r *reapProvider) VolumeRename(string, string) error                { return nil }
+func (r *reapProvider) VolumeDelete(string) error                        { return nil }
+func (r *reapProvider) UserDataMaxBytes() int                            { return 32768 }
+func (r *reapProvider) PriceHourly(string, string) string                { return "" }
 
 // TestReapNoBoxIsNoop: nothing to reap -> reset idle, no down.
 func TestReapNoBoxIsNoop(t *testing.T) {
@@ -104,9 +104,9 @@ func TestReapNoBoxIsNoop(t *testing.T) {
 // of every busy signal (a box that always looks busy is exactly the case
 // the idle reaper cannot stop).
 func TestReapLifetimeCapForceReaps(t *testing.T) {
-	p := newReapTestProfile(t, 1, 30) // cap 1h
+	p := newReapTestProfile(t, 1, 30)                                                                        // cap 1h
 	ops := &recordingReapOps{conns: 99, load: 99.0, files: []fileSignalResult{{path: "fresh", fresh: true}}} // very busy
-	prov := &reapProvider{probe: probeServer(61, true)}            // 61min > 60
+	prov := &reapProvider{probe: probeServer(61, true)}                                                      // 61min > 60
 	if err := reapOne(p, prov, ops); err != nil {
 		t.Fatal(err)
 	}
@@ -199,6 +199,34 @@ func TestReapUnreachableThenZombieReap(t *testing.T) {
 	}
 }
 
+// TestReapUnreachableCustomThreshold: REAP_AFTER_UNREACHABLE_MIN is a
+// per-profile knob (default 60). A tighter value reaps a zombie sooner —
+// the threshold is no longer a hardcoded 12. Matters more now that a box
+// sabotaging its own keep self-reaps on this clock.
+func TestReapUnreachableCustomThreshold(t *testing.T) {
+	p := newReapTestProfile(t, 0, 30)
+	p.reapAfterUnreachableMin = 15 // 15/5 = 3 ticks (vs default 60 -> 12)
+	prov := &reapProvider{probe: probeServer(1, true)}
+	// 2 unreachable ticks -> not yet
+	for i := 0; i < 2; i++ {
+		ops := &recordingReapOps{probeErr: errors.New("unreachable")}
+		if err := reapOne(p, prov, ops); err != nil {
+			t.Fatal(err)
+		}
+		if ops.downCalls != 0 {
+			t.Fatalf("unreachable tick %d -> downCalls=%d, want 0 (threshold 3)", i+1, ops.downCalls)
+		}
+	}
+	// 3rd unreachable tick -> reap (the custom threshold, not the default 12)
+	ops := &recordingReapOps{probeErr: errors.New("unreachable")}
+	if err := reapOne(p, prov, ops); err != nil {
+		t.Fatal(err)
+	}
+	if ops.downCalls != 1 {
+		t.Errorf("3rd unreachable tick -> downCalls=%d, want 1 (REAP_AFTER_UNREACHABLE_MIN=15 -> 3 ticks)", ops.downCalls)
+	}
+}
+
 // TestReapBadLoadBusyDegradesToKeep: a non-numeric LOAD_BUSY defaults to
 // 0.40, NEVER to 0 (0 would read every box as busy -> never reaped, meter
 // runs). The knob must degrade toward KEEPING the box, not reaping.
@@ -265,13 +293,13 @@ func TestParseProbeOutput(t *testing.T) {
 // silent zero that could read as idle and reap a working box.
 func TestParseProbeOutputShortRead(t *testing.T) {
 	bad := []string{
-		"",                             // empty output
-		"load=0.41\nfile=1\n",           // conns missing
-		"conns=2\nfile=1\n",             // load missing
+		"",                               // empty output
+		"load=0.41\nfile=1\n",            // conns missing
+		"conns=2\nfile=1\n",              // load missing
 		"conns=2\nload=oops\nfile=1\n",   // load unparseable
 		"conns=2\nload=0.41\nfile=yes\n", // file present but unparseable (bad value)
 		"conns=two\nload=0.41\nfile=1\n", // conns unparseable
-		"not key value at all",          // no '=' lines
+		"not key value at all",           // no '=' lines
 	}
 	for _, s := range bad {
 		if _, _, _, err := parseProbeOutput(s); err == nil {

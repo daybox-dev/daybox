@@ -102,12 +102,18 @@ func reapOne(p *profile, prov Provider, ops reapOps) error {
 
 	conns, load, files, probeErr := ops.busyProbe(s.IP)
 	if probeErr != nil {
-		// unreachable: tick the unreachable counter; an hour = zombie reaped
+		// unreachable: tick the unreachable counter; REAP_AFTER_UNREACHABLE_MIN
+		// (default 60 = 12 ticks × 5min) = zombie reaped. A box sabotaging its
+		// own keep makes its own probe time out → self-reaps on this clock.
 		u := readInt(p.unreachTicksFile()) + 1
 		writeFile(p.unreachTicksFile(), strconv.Itoa(u))
-		say("[%s] big box unreachable (tick %d/12)", p.name, u)
-		if u >= 12 {
-			say("[%s] unreachable for 1h — force reaping", p.name)
+		need := p.reapAfterUnreachableMin / 5
+		if need < 1 {
+			need = 1
+		}
+		say("[%s] big box unreachable (tick %d/%d)", p.name, u, need)
+		if u >= need {
+			say("[%s] unreachable for %dmin — force reaping", p.name, p.reapAfterUnreachableMin)
 			return ops.down(p)
 		}
 		return nil
