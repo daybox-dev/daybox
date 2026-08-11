@@ -68,23 +68,35 @@ below is a consequence of those three sentences.
   A profile's seed is root-at-boot on every future box, so a writable seed
   would be machine-persistence laundered through provisioning — the seed
   stays one-way. What a box *can* do is submit a proposal to the **agent
-  relay** on the control plane: a small daemon (opt-in, disabled by
-  default) that listens only on the private net, identifies the caller by
-  net identity (WhoIs), binds it to the one profile it was summoned under,
-  and stages the proposal as an inert file. Review happens on the laptop as
-  a full diff with `[setup]`/`[persist]` changes flagged — the
-  supply-chain-bearing lines are impossible to skim past — and nothing
-  takes effect until you accept. Honestly said: the relay is the first
-  custom resident daemon on the control plane (everything else there is
-  headscale + sshd + a timer), and the node→profile binding is only as
-  strong as the net identity a root-compromised box holds — which is why
-  the relay's ceiling is proposal spam, never an applied change. The human
-  diff review is the boundary; the relay just does the paperwork.
+  relay** on the control plane: a small daemon (**default-on**) that listens
+  only on the private net, identifies the caller by net identity (WhoIs),
+  binds it to the one profile it was summoned under, and stages the proposal
+  as an inert file. Review happens on the laptop as a full diff with
+  `[setup]`/`[persist]` changes flagged — the supply-chain-bearing lines are
+  impossible to skim past — and nothing takes effect until you accept.
+  Honestly said: the relay is the first custom resident daemon on the
+  control plane (everything else there is headscale + sshd + a timer), and
+  the node→profile binding is only as strong as the net identity a
+  root-compromised box holds — which is why the relay's ceiling is proposal
+  spam, never an applied change. The human diff review is the boundary; the
+  relay just does the paperwork.
+- **A box may declare its own keep-signals; the caps bound the spend.** The
+  idle reaper's file-freshness signals (keep.toml) live on the box's
+  persistent volume and are writable by the box — no approval, because keep
+  has no authority: it can only *delay* a reap, never run code or persist
+  identity. A long-running script points the reaper at a file it touches; a
+  detached agent at its transcript dir. The bound that makes this safe is
+  independent and plane-side: `MAX_LIFETIME_HOURS` (default 12) force-reaps
+  regardless of activity, and `REAP_AFTER_UNREACHABLE_MIN` (default 60)
+  force-reaps a box whose probe times out (a box sabotaging its own keep
+  makes its own probe slow → self-reaps). A box cannot raise these caps
+  (they're plane-side config); it can only ask to be kept alive within them.
 - **A hard cost cap (shipping for v1).** Independent of the idle reaper, a
   configurable max-lifetime / spend ceiling force-reaps a box regardless of
-  activity, so a runaway process can't quietly bill all weekend. (The idle
+  activity, so a runaway process can't quietly bill all weekend — and it's
+  the bound that makes box-writable keep-signals safe (above). (The idle
   reaper handles the normal case: gone ~30min after you stop, force-reaped
-  after 1h unreachable.)
+  after `REAP_AFTER_UNREACHABLE_MIN` unreachable.)
 
 ## Deliberate non-goals for v1 (eyes open)
 
