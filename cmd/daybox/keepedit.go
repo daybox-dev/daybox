@@ -144,14 +144,18 @@ func cmdKeepPlane(p Parsed) {
 
 // fetchKeep reads the box's keep.toml via the plane (the laptop → plane →
 // box hop). name is validated (validProfileName) before interpolation.
+// Uses remoteDaybox (the absolute path) — the plane's non-interactive ssh
+// PATH doesn't include ~/.local/bin, so a bare "daybox" fails with
+// "command not found" (caught live in W11).
 func fetchKeep(host, name string) (string, error) {
-	return sshCapture(host, "daybox -p "+name+" keep cat")
+	return sshCapture(host, remoteDaybox+" -p "+name+" keep cat")
 }
 
 // pushKeep writes content to the box's keep.toml via the plane (laptop →
-// plane → box over ssh stdin, so the file never hits argv).
+// plane → box over ssh stdin, so the file never hits argv). remoteDaybox
+// for the same PATH reason as fetchKeep.
 func pushKeep(host, name, content string) error {
-	return sshFeed(host, "daybox -p "+name+" keep put", content)
+	return sshFeed(host, remoteDaybox+" -p "+name+" keep put", content)
 }
 
 // validateKeepToml checks content is a valid keep.toml: parses as TOML and
