@@ -77,6 +77,13 @@ echo done
 		t.Fatalf("renderUserData: %v", err)
 	}
 	if got != string(want) {
+		if os.Getenv("DAYBOX_REGEN_GOLDEN") == "1" {
+			if err := os.WriteFile(goldenPath, []byte(got), 0o644); err != nil {
+				t.Fatalf("regen: write %s: %v", goldenPath, err)
+			}
+			t.Logf("regenerated %s (%d bytes) — review + commit", goldenPath, len(got))
+			return
+		}
 		// first divergence helps debug
 		gotLines := strings.Split(got, "\n")
 		wantLines := strings.Split(string(want), "\n")

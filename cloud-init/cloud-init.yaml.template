@@ -139,6 +139,14 @@ write_files:
       if ! mountpoint -q /work; then mount /work; fi
       mkdir -p /work/repos /work/state
 
+      # ---- keep.toml: the box's own liveness declaration ----
+      # Lives on the persistent volume (survives reaps + down/up) so the box
+      # owns it; an empty/absent file = ssh+load only (the safe baseline).
+      # Idempotent: a down+up preserves an existing keep.toml; a fresh
+      # volume gets an empty one the box/laptop can edit.
+      mkdir -p /work/state/daybox
+      [ -f /work/state/daybox/keep.toml ] || printf '' > /work/state/daybox/keep.toml
+
       # ---- git identity: generated once, lives on the volume ----
       # Quoted heredoc, NOT printf: the values are substituted at render
       # time and may contain quotes (O'Brien) — inside <<'…' they are data.
