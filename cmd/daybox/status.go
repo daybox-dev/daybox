@@ -8,6 +8,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/BurntSushi/toml"
 )
 
 // status.go — the plane-side `status` (bash status_one + cmd_status +
@@ -70,6 +72,15 @@ func statusOne(p *profile, prov Provider, w io.Writer) {
 		} else {
 			fmt.Fprintln(w, "  lifetime cap: DISABLED (MAX_LIFETIME_HOURS=0) — only the idle reaper stops the meter")
 		}
+	}
+	// keep: the box's active file-freshness signals (on its /work volume).
+	// Non-blocking — a transient ssh error shows '?', never a hang (the
+	// reaper owns the slow-box path; status must stay fast).
+	content, ok := keepFetchForStatus(p, s.IP)
+	if !ok {
+		fmt.Fprintln(w, "  keep: ?")
+	} else {
+		fmt.Fprintf(w, "  keep: %s\n", renderKeep(content))
 	}
 }
 
@@ -226,6 +237,48 @@ func reapTicks(idleMin int) int {
 		n = 1
 	}
 	return n
+}
+
+// keepFetchForStatus reads a box's keep.toml for the status block (plane →
+// box, 5s timeout so status never hangs on a slow box). Returns ok=false
+// on a fetch failure (status shows '?'). Overridable in tests so statusOne
+// doesn't ssh.
+var keepFetchForStatus = func(p *profile, ip string) (string, bool) {
+	args := append([]string{"timeout", "5", "ssh"}, sshBoxOpts(p)...)
+	args = append(args, p.remoteUser+"@"+ip, "cat /work/state/daybox/keep.toml 2>/dev/null")
+	out, err := exec.Command(args[0], args[1:]...).Output()
+	if err != nil {
+		return "", false
+	}
+	return string(out), true
+}
+
+// renderKeep renders a box's active keep.toml for the status block. Empty
+// = "none — ssh+load only"; a bad entry is skipped (loadKeepToml logs it;
+// status is quiet). A structurally unparseable file shows '?'. Pure so the
+// render is unit-testable without a box.
+func renderKeep(content string) string {
+	var doc struct {
+		Files []keepFileEntry `toml:"files"`
+	}
+	if _, err := toml.Decode(content, &doc); err != nil {
+		return "? (keep.toml unparseable)"
+	}
+	var parts []string
+	for _, f := range doc.Files {
+		if !keepPathRe.MatchString(f.Path) {
+			continue
+		}
+		d, err := time.ParseDuration(f.Within)
+		if err != nil || d <= 0 {
+			continue
+		}
+		parts = append(parts, fmt.Sprintf("%s (within %s)", f.Path, f.Within))
+	}
+	if len(parts) == 0 {
+		return "none — ssh+load only"
+	}
+	return strings.Join(parts, ", ")
 }
 
 // priceFloat parses a "0.2259" price string; 0 on error.

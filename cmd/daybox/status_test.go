@@ -13,26 +13,30 @@ type statusProvider struct {
 	price string
 }
 
-func (s *statusProvider) Name() string             { return "hetzner" }
-func (s *statusProvider) HasCredentials() bool      { return true }
-func (s *statusProvider) CheckCredentials() error   { return nil }
-func (s *statusProvider) PrepareSSHKeys(string) error { return nil }
+func (s *statusProvider) Name() string                  { return "hetzner" }
+func (s *statusProvider) HasCredentials() bool          { return true }
+func (s *statusProvider) CheckCredentials() error       { return nil }
+func (s *statusProvider) PrepareSSHKeys(string) error   { return nil }
 func (s *statusProvider) Probe(string) (*Server, error) { return s.probe, nil }
 func (s *statusProvider) Summon(string, string, string, string, string, string) (Server, error) {
 	return Server{}, nil
 }
-func (s *statusProvider) Reap(string) error             { return nil }
+func (s *statusProvider) Reap(string) error                                { return nil }
 func (s *statusProvider) VolumeEnsure(string, int, string) (string, error) { return "1", nil }
-func (s *statusProvider) VolumeAttachedTo(string) (string, error) { return "", nil }
-func (s *statusProvider) VolumeDetach(string) error    { return nil }
-func (s *statusProvider) VolumeSize(string) (int, error) { return 50, nil }
-func (s *statusProvider) VolumeRename(string, string) error { return nil }
-func (s *statusProvider) VolumeDelete(string) error    { return nil }
-func (s *statusProvider) UserDataMaxBytes() int        { return 32768 }
-func (s *statusProvider) PriceHourly(string, string) string { return s.price }
+func (s *statusProvider) VolumeAttachedTo(string) (string, error)          { return "", nil }
+func (s *statusProvider) VolumeDetach(string) error                        { return nil }
+func (s *statusProvider) VolumeSize(string) (int, error)                   { return 50, nil }
+func (s *statusProvider) VolumeRename(string, string) error                { return nil }
+func (s *statusProvider) VolumeDelete(string) error                        { return nil }
+func (s *statusProvider) UserDataMaxBytes() int                            { return 32768 }
+func (s *statusProvider) PriceHourly(string, string) string                { return s.price }
 
 func newStatusProfile(t *testing.T, maxHours int) *profile {
 	p := newReapTestProfile(t, maxHours, 30) // reuse the helper
+	// tests don't ssh to a real box for the keep line
+	prev := keepFetchForStatus
+	keepFetchForStatus = func(*profile, string) (string, bool) { return "", true }
+	t.Cleanup(func() { keepFetchForStatus = prev })
 	return p
 }
 
@@ -122,8 +126,14 @@ func TestNetTableParses(t *testing.T) {
 	// node-struct parse path directly via a helper that mimics netTable's
 	// JSON shape.
 	nodes := []netNode{
-		{ID: 4, GivenName: "laptop-air", Name: "laptop-air", IPAddresses: []string{"100.64.0.3"}, User: struct{ Name string `json:"name"` }{Name: "operator"}, Online: false},
-		{ID: 57, GivenName: "daybox-default", Name: "daybox-default", IPAddresses: []string{"100.64.0.56"}, User: struct{ Name string `json:"name"` }{Name: "operator"}, Connected: true, PreAuthKey: &struct{ Ephemeral bool `json:"ephemeral"` }{Ephemeral: true}},
+		{ID: 4, GivenName: "laptop-air", Name: "laptop-air", IPAddresses: []string{"100.64.0.3"}, User: struct {
+			Name string `json:"name"`
+		}{Name: "operator"}, Online: false},
+		{ID: 57, GivenName: "daybox-default", Name: "daybox-default", IPAddresses: []string{"100.64.0.56"}, User: struct {
+			Name string `json:"name"`
+		}{Name: "operator"}, Connected: true, PreAuthKey: &struct {
+			Ephemeral bool `json:"ephemeral"`
+		}{Ephemeral: true}},
 	}
 	b, _ := json.Marshal(nodes)
 	var parsed []netNode
@@ -155,5 +165,109 @@ func TestStatusSpendCalc(t *testing.T) {
 	spend := priceFloat("0.2259") * 60 / 60
 	if spend < 0.22 || spend > 0.23 {
 		t.Errorf("spend calc = %v, want ~0.23", spend)
+	}
+}
+
+// --- keep-in-status tests ---
+
+func TestRenderKeepEmpty(t *testing.T) {
+	if got := renderKeep(""); got != "none — ssh+load only" {
+		t.Errorf("empty keep -> %q, want the ssh+load baseline", got)
+	}
+	if got := renderKeep("# no signals\n"); got != "none — ssh+load only" {
+		t.Errorf("comment-only keep -> %q", got)
+	}
+}
+
+func TestRenderKeepOneEntry(t *testing.T) {
+	got := renderKeep(`[[files]]
+path = "/work/state/claude/projects"
+within = "10m"
+`)
+	if !strings.Contains(got, "/work/state/claude/projects") || !strings.Contains(got, "within 10m") {
+		t.Errorf("one entry -> %q, want path + within", got)
+	}
+}
+
+func TestRenderKeepMultiple(t *testing.T) {
+	got := renderKeep(`[[files]]
+path = "/work/state/claude/projects"
+within = "10m"
+
+[[files]]
+path = "/tmp/build.log"
+within = "2m"
+`)
+	if !strings.Contains(got, "/work/state/claude/projects") || !strings.Contains(got, "/tmp/build.log") {
+		t.Errorf("multiple -> %q, want both paths", got)
+	}
+}
+
+func TestRenderKeepSkipsBadEntries(t *testing.T) {
+	// a bad path + a good one: only the good one renders (status is quiet;
+	// loadKeepToml logs, status isn't).
+	got := renderKeep(`[[files]]
+path = "relative/bad"
+within = "10m"
+
+[[files]]
+path = "/ok/path"
+within = "5m"
+`)
+	if strings.Contains(got, "relative/bad") {
+		t.Errorf("bad path should be skipped: %q", got)
+	}
+	if !strings.Contains(got, "/ok/path") {
+		t.Errorf("good path should render: %q", got)
+	}
+}
+
+func TestRenderKeepUnparseable(t *testing.T) {
+	if got := renderKeep("this is not = = valid {{{"); !strings.HasPrefix(got, "?") {
+		t.Errorf("unparseable -> %q, want '?'", got)
+	}
+}
+
+// TestStatusKeepLine: statusOne renders the keep line from the box's
+// keep.toml. keepFetchForStatus is overridden so the test doesn't ssh.
+func TestStatusKeepLine(t *testing.T) {
+	p := newStatusProfile(t, 12)
+	prev := keepFetchForStatus
+	keepFetchForStatus = func(*profile, string) (string, bool) {
+		return `[[files]]
+path = "/work/state/claude/projects"
+within = "10m"
+`, true
+	}
+	t.Cleanup(func() { keepFetchForStatus = prev })
+	var out bytes.Buffer
+	statusOne(p, &statusProvider{
+		probe: &Server{ID: "x", Name: "daybox-default", IP: "5.0.0.1", Status: "running", Created: "2026-08-09T19:44:54Z", Type: "ccx33"},
+		price: "0.2259",
+	}, &out)
+	got := out.String()
+	if !strings.Contains(got, "keep:") {
+		t.Errorf("missing keep line: %q", got)
+	}
+	if !strings.Contains(got, "/work/state/claude/projects") {
+		t.Errorf("keep line missing the path: %q", got)
+	}
+}
+
+// TestStatusKeepLineFetchFail: a transient ssh failure shows '?', never a
+// hang or a missing line (status must stay fast).
+func TestStatusKeepLineFetchFail(t *testing.T) {
+	p := newStatusProfile(t, 12)
+	prev := keepFetchForStatus
+	keepFetchForStatus = func(*profile, string) (string, bool) { return "", false }
+	t.Cleanup(func() { keepFetchForStatus = prev })
+	var out bytes.Buffer
+	statusOne(p, &statusProvider{
+		probe: &Server{ID: "x", Name: "daybox-default", IP: "5.0.0.1", Status: "running", Created: "2026-08-09T19:44:54Z", Type: "ccx33"},
+		price: "0.2259",
+	}, &out)
+	got := out.String()
+	if !strings.Contains(got, "keep: ?") {
+		t.Errorf("fetch fail -> %q, want 'keep: ?'", got)
 	}
 }
