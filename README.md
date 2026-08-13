@@ -212,7 +212,7 @@ path   = "/work/state/claude/projects"   # absolute; volume-relative in practice
 within = "10m"                            # fresh if a file's mtime is within this
 
 [[files]]
-path   = "/work/state/pi/.pi/agent/sessions"
+path   = "/work/state/pi-home/agent/sessions"
 within = "10m"
 ```
 
