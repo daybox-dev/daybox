@@ -116,7 +116,7 @@ func cmdKeepPlane(p Parsed) {
 		log.Fatal("usage: daybox keep cat|put  (invoked by 'daybox keep edit' on a laptop)")
 	}
 	dep := loadDeployment()
-	prof, err := dep.deriveProfile(profileNameOrCurrent(dep, p.Global("profile")))
+	prof, err := dep.requireProfile(p.Global("profile"))
 	if err != nil {
 		log.Fatal(err)
 	}

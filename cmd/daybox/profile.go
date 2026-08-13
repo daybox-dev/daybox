@@ -191,6 +191,29 @@ func (d *deployment) currentProfile(name string) (string, bool) {
 	return "default", false
 }
 
+// profileExists reports whether a profile has been set up — i.e. it has a
+// state dir (~/.config/daybox/state/profiles/<name>), the same marker
+// listProfiles/profileUse/profileRm/profileRename key off. It creates
+// nothing, so it is safe to call as a guard BEFORE deriveProfile: derive
+// mkdirs the state dir as a side effect, which is what made `daybox up -p
+// <typo>` leave a phantom profile that `profile ls` then listed as real.
+func (d *deployment) profileExists(name string) bool {
+	return fileExists(filepath.Join(d.stateDir, "profiles", name))
+}
+
+// requireProfile resolves the -p flag (else the current_profile file, else
+// 'default') AND verifies the profile was set up — WITHOUT creating a
+// state dir. It is the guard every acting verb (up/ssh/attach/down/keep,
+// and `status -p`) runs before deriveProfile, so a typo dies here with
+// setup help instead of leaving an empty state/profiles/<name> behind.
+func (d *deployment) requireProfile(explicit string) (*profile, error) {
+	name, _ := d.currentProfile(explicit)
+	if !d.profileExists(name) {
+		return nil, fmt.Errorf("no such profile '%s' — create it with: daybox profile add %s  (or 'daybox setup' for the default profile)", name, name)
+	}
+	return d.deriveProfile(name)
+}
+
 // seedFile is the profile's declared profile.toml — what a box CARRIES.
 // bash: SEED_FILE_FOR. Inventing a default at summon time would mean a box
 // silently carrying something its profile never declared — the drift this

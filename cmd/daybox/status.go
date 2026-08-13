@@ -88,9 +88,9 @@ func statusOne(p *profile, prov Provider, w io.Writer) {
 // block (or one, with -p) plus the net table.
 func statusRun(dep *deployment, w io.Writer, explicitName string) {
 	if explicitName != "" {
-		p, err := dep.deriveProfile(explicitName)
+		p, err := dep.requireProfile(explicitName)
 		if err != nil {
-			fmt.Fprintf(w, "profile '%s': %v\n", explicitName, err)
+			fmt.Fprintln(w, err)
 			return
 		}
 		prov, err := dep.loadProvider(p.provider)

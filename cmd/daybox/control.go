@@ -216,6 +216,40 @@ func sshRunningBox(dep *deployment, p *profile, cmd []string) error {
 	return nil
 }
 
+// profileUsageText is the `daybox profile` group's own usage, printed for
+// `profile --help`/`-h`/`help` and for an unknown subverb. The top-level
+// usage only sketches the profile group; this lists every subverb routed
+// here (edit/proposals/accept/reject/propose are laptop-authority) and in
+// cmdProfilePlane (add/ls/use/rename/rm/seed).
+const profileUsageText = `usage: daybox profile <subcommand> [args]
+
+A profile is a whole daybox (own server + volume + creds). Add -p <name> to
+the everyday verbs (up/ssh/attach/down/status) to target one (default:
+'default').
+
+subcommands:
+  add <name> [type]              create a profile (writes config + creates its volume)
+  ls                             list every profile: box state + volume size
+  use <name>                     set the profile bare commands resolve to
+  rename <old> <new>             rename (box must be down)
+  rm <name> [--purge]            reap box; keep the volume unless --purge
+  seed [show|init|path] [<name>] manage the profile's seed (what a box carries)
+  edit [name]                    edit a profile's seed in $EDITOR (applied next up)
+  proposals                      review box-proposed seed changes
+  accept <id>                    accept a proposal
+  reject <id>                    reject a proposal
+  propose                        (on a box) propose detected drift to the profile
+`
+
+func profileUsage() { fmt.Fprint(os.Stderr, profileUsageText) }
+
+// isProfileHelp reports whether tok is a help spelling the profile group
+// honours at its top level (--help/-h/help). The grammar does not hoist
+// these (only -p/--profile is global), so they arrive in Rest.
+func isProfileHelp(tok string) bool {
+	return tok == "--help" || tok == "-h" || tok == "help"
+}
+
 // cmdProfile routes the `profile` group. The laptop-authority subverbs
 // (profilecmd.go, proposalcmd.go — edit/proposals/accept/reject/propose)
 // NEVER delegate — approval is a laptop-side action by design (§1e). The
@@ -223,6 +257,13 @@ func sshRunningBox(dep *deployment, p *profile, cmd []string) error {
 // plane when amPlane, else delegate.
 func cmdProfile(p Parsed) {
 	rest := p.Rest()
+	// `daybox profile --help` (or -h/help): print the group usage, not the
+	// "unknown subverb" fatal the plane otherwise emits for --help. Checked
+	// before the laptop/plane split so both roles agree.
+	if len(rest) > 0 && isProfileHelp(rest[0]) {
+		profileUsage()
+		return
+	}
 	if len(rest) > 0 {
 		switch rest[0] {
 		case "edit":
@@ -370,7 +411,7 @@ func cmdUp(p Parsed) {
 	// PLANE role: do the summon here. No stdout IP/HOSTKEY contract (bug #3).
 	if amPlane() {
 		dep := loadDeployment()
-		prof, err := dep.deriveProfile(profileNameOrCurrent(dep, name))
+		prof, err := dep.requireProfile(name)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -406,13 +447,6 @@ func cmdUp(p Parsed) {
 	delegate(p, true) // tty: the plane ssh'es in interactively
 }
 
-// profileNameOrCurrent resolves the -p flag to a profile name, falling back
-// to the current_profile file, then 'default'. Returns the resolved name.
-func profileNameOrCurrent(dep *deployment, explicit string) string {
-	name, _ := dep.currentProfile(explicit)
-	return name
-}
-
 // cmdSSH: a fresh shell (or one-off command) on the box, hopping via the
 // control plane — works even when the box only allows the control plane in.
 // tmux is a user choice: `daybox attach` is the persistent session.
@@ -421,7 +455,7 @@ func cmdSSH(p Parsed) {
 	// laptop delegates `daybox ssh` here, so this is the box-facing half.
 	if amPlane() {
 		dep := loadDeployment()
-		prof, err := dep.deriveProfile(profileNameOrCurrent(dep, p.Global("profile")))
+		prof, err := dep.requireProfile(p.Global("profile"))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -440,7 +474,7 @@ func cmdAttach(p Parsed) {
 	// cmd_ssh with /home/$USER/.local/bin/devbox-tmux as the command).
 	if amPlane() {
 		dep := loadDeployment()
-		prof, err := dep.deriveProfile(profileNameOrCurrent(dep, p.Global("profile")))
+		prof, err := dep.requireProfile(p.Global("profile"))
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -498,7 +532,7 @@ func cmdDown(p Parsed) {
 	name := p.Global("profile")
 	if amPlane() {
 		dep := loadDeployment()
-		prof, err := dep.deriveProfile(profileNameOrCurrent(dep, name))
+		prof, err := dep.requireProfile(name)
 		if err != nil {
 			log.Fatal(err)
 		}
