@@ -338,8 +338,18 @@ func cmdProfilePlane(p Parsed) {
 			log.Fatal(err)
 		}
 	case "rename", "mv":
+		// like add: <old> comes from -p when present; otherwise rest[0]
+		// is <old> and rest[1] is <new>. (The grammar hoists -p into name,
+		// so rest is the positional tail.)
 		new := ""
-		if len(rest) > 0 {
+		if name == "" {
+			if len(rest) > 0 {
+				name = rest[0]
+			}
+			if len(rest) > 1 {
+				new = rest[1]
+			}
+		} else if len(rest) > 0 {
 			new = rest[0]
 		}
 		if name == "" || new == "" {

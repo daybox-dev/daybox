@@ -134,6 +134,53 @@ func TestProfileRenameRefusesLiveBox(t *testing.T) {
 	}
 }
 
+// TestProfilePlaneRenamePositional: `daybox profile rename <old> <new>` with
+// no -p flag must take <old> from rest[0] and <new> from rest[1]. This is
+// the dispatch path through cmdProfilePlane (Parse → handler), not the
+// profileRename function directly — it guards the wiring that v0.3.2 broke
+// (new came from rest[0] while name stayed empty → usage fatal).
+func TestProfilePlaneRenamePositional(t *testing.T) {
+	d, prov := newU8Deployment(t)
+	os.MkdirAll(filepath.Join(d.stateDir, "profiles", "claudempany"), 0o755)
+	os.WriteFile(filepath.Join(d.stateDir, "profiles", "claudempany", "volume_id"), []byte("100"), 0o644)
+	c, err := Parse([]string{"profile", "rename", "claudempany", "conductor"}, globalFlags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmdProfilePlane(c)
+	if len(prov.renameCalls) != 1 || prov.renameCalls[0].name != "daybox-conductor-vol" {
+		t.Errorf("volume rename = %+v, want daybox-conductor-vol", prov.renameCalls)
+	}
+	if !fileExists(filepath.Join(d.stateDir, "profiles", "conductor")) {
+		t.Error("state dir not moved claudempany → conductor")
+	}
+	if fileExists(filepath.Join(d.stateDir, "profiles", "claudempany")) {
+		t.Error("old state dir claudempany should be gone")
+	}
+}
+
+// TestProfilePlaneRenameViaProfileFlag: `daybox profile rename -p <old>
+// <new>` hoists <old> into the profile global, so <new> is rest[0].
+func TestProfilePlaneRenameViaProfileFlag(t *testing.T) {
+	d, prov := newU8Deployment(t)
+	os.MkdirAll(filepath.Join(d.stateDir, "profiles", "claudempany"), 0o755)
+	os.WriteFile(filepath.Join(d.stateDir, "profiles", "claudempany", "volume_id"), []byte("100"), 0o644)
+	c, err := Parse([]string{"profile", "rename", "-p", "claudempany", "conductor"}, globalFlags)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := c.Global("profile"); got != "claudempany" {
+		t.Fatalf("Global(profile) = %q, want claudempany", got)
+	}
+	cmdProfilePlane(c)
+	if len(prov.renameCalls) != 1 || prov.renameCalls[0].name != "daybox-conductor-vol" {
+		t.Errorf("volume rename = %+v, want daybox-conductor-vol", prov.renameCalls)
+	}
+	if !fileExists(filepath.Join(d.stateDir, "profiles", "conductor")) {
+		t.Error("state dir not moved claudempany → conductor")
+	}
+}
+
 // TestProfileRmProtectsDefault: 'default' cannot be removed.
 func TestProfileRmProtectsDefault(t *testing.T) {
 	d, _ := newU8Deployment(t)
