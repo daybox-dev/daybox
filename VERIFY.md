@@ -3,7 +3,7 @@
 Every release at `https://daybox.dev/dl/<version>/` contains the platform
 binaries, this source tree as `daybox-<version>-src.tar.gz`, and a
 `SHA256SUMS` manifest signed with minisign. The same tree is browsable at
-`https://daybox.dev/src/<version>/`. One key signs everything; it is
+`https://github.com/daybox-dev/daybox/tree/<version>`. One key signs everything; it is
 pinned in `install.sh`, in `cmd/daybox/payload.go`, and here:
 
     RWSIiu1rtvgQzS1cqko1+oQxjHyw07jZqyzaid/zVPFIzxKyQ+rkz0/2

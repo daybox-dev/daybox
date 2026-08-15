@@ -114,7 +114,6 @@ echo
 echo "About to publish $VERSION to R2 (daybox.dev):"
 echo "  /dl/$VERSION/  and  /dl/latest/   (artifacts + signed sums)"
 echo "  /install.sh                       (pins $VERSION)"
-echo "  /src/$VERSION/  and  /src/latest/ (browsable source tree)"
 echo "  control plane: $CONTROL (R2 creds live here)"
 echo
 read -rp "publish $VERSION to R2? [y/N] " ans
@@ -168,20 +167,6 @@ done
 # The installer pins this release's sums hash; the previously-served one
 # attests an older release, so leaving it makes the one-liner fail. NOT optional.
 put "site/install.sh" "install.sh" "text/plain; charset=utf-8"
-
-# Browsable source tree: the same git-archive tarball, exploded, plus the
-# src/LATEST pointer /src/latest/* resolves through.
-SRCTMP=$(mktemp -d)
-tar -xzf "daybox-$VERSION-src.tar.gz" -C "$SRCTMP"
-TREE="$SRCTMP/daybox-$VERSION"
-[ -d "$TREE" ] || { echo "release.sh: tarball has no daybox-$VERSION/" >&2; exit 1; }
-find "$TREE" -type f | LC_ALL=C sort | while IFS= read -r f; do
-    rel=${f#"$TREE"/}
-    put "src/$VERSION/$rel" "$f" "text/plain; charset=utf-8"
-done
-printf '%s\n' "$VERSION" > "$SRCTMP/LATEST"
-put "src/LATEST" "$SRCTMP/LATEST" "text/plain; charset=utf-8"
-rm -rf "$SRCTMP"
 UPLOAD
 say "uploaded"
 
@@ -248,17 +233,6 @@ if [ -s /tmp/release-vfy.bin ]; then
     if [ "$GOT_VER" = "$VERSION" ]; then vok "binary reports $VERSION"
     else vfail "binary reports '${GOT_VER:-<none>}' != $VERSION"; fi
 fi
-
-# source tree + LATEST pointer
-LOCAL_GOMOD=$(sha < "$ROOT/go.mod")
-for p in "src/$VERSION/go.mod" "src/latest/go.mod"; do
-    GOT=$(curl -fsS "$SITE/$p" 2>/dev/null | sha || true)
-    if [ "$GOT" = "$LOCAL_GOMOD" ]; then vok "/$p matches local"
-    else vfail "/$p differs from local (latest/ heals in 60s; a versioned mismatch is real)"; fi
-done
-LAT=$(curl -fsS "$SITE/src/LATEST" 2>/dev/null || true)
-if [ "$LAT" = "$VERSION" ]; then vok "/src/LATEST = $VERSION"
-else vfail "/src/LATEST = '${LAT:-<none>}' != $VERSION"; fi
 
 rm -f /tmp/release-vfy.sums /tmp/release-vfy.sig /tmp/release-vfy.lat /tmp/release-vfy.bin
 
