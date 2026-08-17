@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>daybox control plane</title>
+<style>
+  body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 60rem; }
+  h1 { font-size: 1.2rem; }
+  pre { background: #f4f4f4; padding: 1rem; white-space: pre-wrap; border-radius: .25rem; }
+  .stale { opacity: .6; }
+</style>
+</head>
+<body>
+<h1>daybox control plane</h1>
+<pre id="status">loading…</pre>
+<script>
+  const status = document.getElementById('status');
+  async function refresh() {
+    try {
+      const r = await fetch('/api/status');
+      status.classList.remove('stale');
+      status.textContent = r.ok ? await r.text() : 'error: ' + r.status;
+    } catch (e) {
+      status.classList.add('stale');
+      status.textContent = 'offline: ' + e;
+    }
+  }
+  refresh();
+  setInterval(refresh, 10000);
+</script>
+</body>
+</html>
