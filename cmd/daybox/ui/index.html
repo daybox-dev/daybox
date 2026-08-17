@@ -5,29 +5,121 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>daybox control plane</title>
 <style>
-  body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 60rem; }
-  h1 { font-size: 1.2rem; }
-  pre { background: #f4f4f4; padding: 1rem; white-space: pre-wrap; border-radius: .25rem; }
-  .stale { opacity: .6; }
+  :root { color-scheme: light dark; }
+  body { font-family: system-ui, sans-serif; margin: 1.5rem; max-width: 56rem; }
+  header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: 1rem; }
+  h1 { font-size: 1.15rem; margin: 0; }
+  .sub { color: #888; font-size: .85rem; }
+  section { margin-bottom: 1.5rem; }
+  pre { background: rgba(127,127,127,.12); padding: .75rem; white-space: pre-wrap;
+        border-radius: .3rem; font-size: .85rem; margin: 0; }
+  .stale { opacity: .55; }
+  .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
+  label { font-size: .85rem; }
+  input[type=text] { padding: .3rem .4rem; font-size: .85rem; width: 8rem; }
+  button { padding: .35rem .7rem; font-size: .85rem; cursor: pointer; }
+  .danger { color: #b00; }
+  #jobs div { border-left: 2px solid rgba(127,127,127,.4); padding: .25rem 0 .25rem .6rem;
+              margin-bottom: .5rem; }
+  .pill { font-size: .75rem; padding: .05rem .4rem; border-radius: .8rem;
+          background: rgba(127,127,127,.2); }
+  .pill.running { background: #0a84ff; color: #fff; }
+  .pill.failed  { background: #b00;    color: #fff; }
+  .pill.done     { background: #2a7;    color: #fff; }
 </style>
 </head>
 <body>
-<h1>daybox control plane</h1>
-<pre id="status">loading…</pre>
+<header>
+  <h1>daybox control plane</h1>
+  <span class="sub">daybox provides a UI, not an edge — the hoster fronts this listener (SECURITY.md)</span>
+</header>
+
+<section>
+  <h2>status</h2>
+  <pre id="status">loading…</pre>
+</section>
+
+<section>
+  <h2>actions</h2>
+  <div class="row" style="margin-bottom:.5rem">
+    <label>profile <input id="profile" type="text" placeholder="default" value="default"></label>
+  </div>
+  <div class="row">
+    <button data-verb="up">up</button>
+    <button data-verb="down" class="danger">down</button>
+    <button data-verb="reap" class="danger">reap (all profiles)</button>
+  </div>
+  <p class="sub">up uses <code>--detach</code> (summon, don't connect — a browser has no tty). down/reap are destructive; reap ignores the profile field.</p>
+</section>
+
+<section>
+  <h2>jobs</h2>
+  <div id="jobs"><span class="sub">none yet</span></div>
+</section>
+
 <script>
-  const status = document.getElementById('status');
-  async function refresh() {
-    try {
-      const r = await fetch('/api/status');
-      status.classList.remove('stale');
-      status.textContent = r.ok ? await r.text() : 'error: ' + r.status;
-    } catch (e) {
-      status.classList.add('stale');
-      status.textContent = 'offline: ' + e;
-    }
+const statusEl = document.getElementById('status');
+const jobsEl   = document.getElementById('jobs');
+const profileEl = document.getElementById('profile');
+const pollers = {};   // jobId → interval id
+
+async function refreshStatus() {
+  try {
+    const r = await fetch('/api/status');
+    statusEl.classList.remove('stale');
+    statusEl.textContent = r.ok ? await r.text() : ('error: ' + r.status);
+  } catch (e) {
+    statusEl.classList.add('stale');
+    statusEl.textContent = 'offline: ' + e;
   }
-  refresh();
-  setInterval(refresh, 10000);
+}
+
+function startVerb(verb) {
+  const profile = profileEl.value.trim();
+  const body = verb === 'reap' ? {} : { profile };
+  const ok = confirm(verb + (verb === 'reap' ? ' reaps idle boxes across ALL profiles' : ' ' + (profile || 'default')));
+  if (!ok) return;
+  fetch('/api/' + verb, {
+    method: 'POST',
+    headers: { 'Confirm': 'yes', 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(r => r.json()).then(res => {
+    if (res.id) pollJob(res.id, verb, profile);
+    refreshStatus();
+  });
+}
+
+function renderJob(id, verb, profile, snap) {
+  let div = document.getElementById('job-' + id);
+  if (!div) {
+    div = document.createElement('div');
+    div.id = 'job-' + id;
+    jobsEl.appendChild(div);
+  }
+  const t = snap.output || '';
+  div.innerHTML = '<span class="pill ' + snap.state + '">' + snap.state + '</span> ' +
+                  '<b>' + verb + '</b>' + (profile ? ' · ' + profile : '') +
+                  '<pre>' + escapeHtml(t) + '</pre>';
+}
+
+function pollJob(id, verb, profile) {
+  fetch('/api/jobs/' + id).then(r => r.json()).then(snap => {
+    renderJob(id, verb, profile, snap);
+    if (snap.state === 'running') {
+      pollers[id] = setTimeout(() => pollJob(id, verb, profile), 1000);
+    } else {
+      refreshStatus();  // terminal state — refresh the dashboard
+    }
+  });
+}
+
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+document.querySelectorAll('button[data-verb]').forEach(b => b.addEventListener('click', () => startVerb(b.dataset.verb)));
+refreshStatus();
+setInterval(refreshStatus, 10000);
 </script>
 </body>
 </html>
