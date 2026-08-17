@@ -1,0 +1,26 @@
+# The control-plane web UI — a localhost HTTP surface that wraps the daybox
+# verbs, so an operator can manage boxes from a browser without the laptop
+# CLI. Scoped in daybox-internal/docs/control-plane-ui.md.
+#
+# POSTURE NOTE (SECURITY.md): daybox provides a UI, not an edge. This daemon
+# binds 127.0.0.1 ONLY — the hoster fronts it (reverse proxy, Cloudflare
+# Tunnel, their own net) for whatever reachability they want. TLS, auth, and
+# CSRF all live in the hoster's fronting layer; daybox ships none of them. A
+# reachable UI can drive the full verb surface (billable `up`, destructive
+# `down`/`reap`, `keep edit`), so a hoster fronts it deliberately.
+#
+# Default-on is safe: the listener is local-only, so nothing reaches it
+# without a fronting layer the hoster chose to run. Invoked via the daybox
+# CLI path (like the reaper), not the agent path (like relay/join) — `ui` is
+# a plane-side verb, no net identity.
+[Unit]
+Description=daybox control-plane web UI (localhost; the hoster fronts it)
+After=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/daybox ui
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

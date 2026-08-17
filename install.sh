@@ -67,11 +67,14 @@ Linux)
     cp "$REPO/systemd/daybox-reaper.service" "$HOME/.config/systemd/user/"
     cp "$REPO/systemd/daybox-reaper.timer"   "$HOME/.config/systemd/user/"
     cp "$REPO/systemd/daybox-relay.service"  "$HOME/.config/systemd/user/"
+    cp "$REPO/systemd/daybox-ui.service"     "$HOME/.config/systemd/user/"
     systemctl --user daemon-reload
     systemctl --user enable --now daybox-reaper.timer
     echo "  reaper timer enabled (runs 'daybox reap' every 5min)"
     systemctl --user enable --now daybox-relay
     echo "  relay enabled (box-proposed seed changes: a box proposes, the laptop accepts)"
+    systemctl --user enable --now daybox-ui
+    echo "  ui enabled (control-plane web UI at 127.0.0.1:4748 — the hoster fronts it; daybox provides no edge)"
 
     echo "[install] done."
     if [ ! -f "$HOME/.config/daybox/config.local" ]; then
