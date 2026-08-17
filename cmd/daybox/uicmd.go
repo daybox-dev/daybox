@@ -69,6 +69,15 @@ func uiMux(exec uiExec, store string) *http.ServeMux {
 	mux.HandleFunc("POST /api/down", jobHandler(jobs, "down"))
 	mux.HandleFunc("POST /api/reap", jobHandler(jobs, "reap"))
 	mux.HandleFunc("GET /api/jobs/{id}", jobPollHandler(jobs))
+
+	// profiles + proposals — plane-local file ops (no subprocess).
+	mux.HandleFunc("GET /api/profiles", profileListHandler(store))
+	mux.HandleFunc("GET /api/profiles/{name}/seed", profileSeedGetHandler(store))
+	mux.HandleFunc("PUT /api/profiles/{name}/seed", profileSeedPutHandler(store))
+	mux.HandleFunc("GET /api/proposals", proposalListHandler(store))
+	mux.HandleFunc("GET /api/proposals/{id}", proposalGetHandler(store))
+	mux.HandleFunc("POST /api/proposals/{id}/accept", proposalAcceptHandler(store))
+	mux.HandleFunc("POST /api/proposals/{id}/reject", proposalRejectHandler(store))
 	return mux
 }
 

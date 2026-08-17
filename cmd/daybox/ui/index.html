@@ -6,9 +6,10 @@
 <title>daybox control plane</title>
 <style>
   :root { color-scheme: light dark; }
-  body { font-family: system-ui, sans-serif; margin: 1.5rem; max-width: 56rem; }
+  body { font-family: system-ui, sans-serif; margin: 1.5rem; max-width: 58rem; }
   header { display: flex; align-items: baseline; gap: .75rem; margin-bottom: 1rem; }
   h1 { font-size: 1.15rem; margin: 0; }
+  h2 { font-size: 1rem; margin: 0 0 .5rem; }
   .sub { color: #888; font-size: .85rem; }
   section { margin-bottom: 1.5rem; }
   pre { background: rgba(127,127,127,.12); padding: .75rem; white-space: pre-wrap;
@@ -16,16 +17,25 @@
   .stale { opacity: .55; }
   .row { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; }
   label { font-size: .85rem; }
-  input[type=text] { padding: .3rem .4rem; font-size: .85rem; width: 8rem; }
+  input[type=text], textarea { padding: .3rem .4rem; font-size: .85rem;
+        font-family: monospace; border-radius: .3rem; border: 1px solid rgba(127,127,127,.4);
+        background: rgba(127,127,127,.08); color: inherit; }
+  input[type=text] { width: 8rem; }
+  textarea { width: 100%; min-height: 12rem; }
   button { padding: .35rem .7rem; font-size: .85rem; cursor: pointer; }
   .danger { color: #b00; }
-  #jobs div { border-left: 2px solid rgba(127,127,127,.4); padding: .25rem 0 .25rem .6rem;
-              margin-bottom: .5rem; }
+  #jobs div, #proposals div, #profiles div {
+    border-left: 2px solid rgba(127,127,127,.4); padding: .25rem 0 .25rem .6rem;
+    margin-bottom: .5rem; }
   .pill { font-size: .75rem; padding: .05rem .4rem; border-radius: .8rem;
           background: rgba(127,127,127,.2); }
   .pill.running { background: #0a84ff; color: #fff; }
   .pill.failed  { background: #b00;    color: #fff; }
   .pill.done     { background: #2a7;    color: #fff; }
+  .diff { font-family: monospace; font-size: .8rem; white-space: pre; }
+  .diff-add { color: #2a7; }
+  .diff-del { color: #b00; }
+  .seed-tools { margin: .25rem 0; display: flex; gap: .5rem; align-items: center; }
 </style>
 </head>
 <body>
@@ -57,31 +67,44 @@
   <div id="jobs"><span class="sub">none yet</span></div>
 </section>
 
-<script>
-const statusEl = document.getElementById('status');
-const jobsEl   = document.getElementById('jobs');
-const profileEl = document.getElementById('profile');
-const pollers = {};   // jobId → interval id
+<section>
+  <h2>profiles</h2>
+  <div id="profiles"><span class="sub">loading…</span></div>
+</section>
 
+<section>
+  <h2>proposals</h2>
+  <div id="proposals"><span class="sub">none pending</span></div>
+</section>
+
+<script>
+const $ = id => document.getElementById(id);
+const profileEl = $('profile');
+const pollers = {};
+
+function escapeHtml(s) {
+  return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+}
+
+// --- status ---
 async function refreshStatus() {
   try {
     const r = await fetch('/api/status');
-    statusEl.classList.remove('stale');
-    statusEl.textContent = r.ok ? await r.text() : ('error: ' + r.status);
+    $('status').classList.remove('stale');
+    $('status').textContent = r.ok ? await r.text() : ('error: ' + r.status);
   } catch (e) {
-    statusEl.classList.add('stale');
-    statusEl.textContent = 'offline: ' + e;
+    $('status').classList.add('stale');
+    $('status').textContent = 'offline: ' + e;
   }
 }
 
+// --- jobs (up/down/reap) ---
 function startVerb(verb) {
   const profile = profileEl.value.trim();
   const body = verb === 'reap' ? {} : { profile };
-  const ok = confirm(verb + (verb === 'reap' ? ' reaps idle boxes across ALL profiles' : ' ' + (profile || 'default')));
-  if (!ok) return;
+  if (!confirm(verb + (verb === 'reap' ? ' reaps idle boxes across ALL profiles' : ' ' + (profile || 'default')))) return;
   fetch('/api/' + verb, {
-    method: 'POST',
-    headers: { 'Confirm': 'yes', 'Content-Type': 'application/json' },
+    method: 'POST', headers: { 'Confirm': 'yes', 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
   }).then(r => r.json()).then(res => {
     if (res.id) pollJob(res.id, verb, profile);
@@ -90,36 +113,111 @@ function startVerb(verb) {
 }
 
 function renderJob(id, verb, profile, snap) {
-  let div = document.getElementById('job-' + id);
-  if (!div) {
-    div = document.createElement('div');
-    div.id = 'job-' + id;
-    jobsEl.appendChild(div);
-  }
-  const t = snap.output || '';
-  div.innerHTML = '<span class="pill ' + snap.state + '">' + snap.state + '</span> ' +
-                  '<b>' + verb + '</b>' + (profile ? ' · ' + profile : '') +
-                  '<pre>' + escapeHtml(t) + '</pre>';
+  let div = $('job-' + id) || (() => {
+    let d = document.createElement('div'); d.id = 'job-' + id; $('jobs').appendChild(d); return d;
+  })();
+  div.innerHTML = '<span class="pill ' + snap.state + '">' + snap.state + '</span> <b>' + verb + '</b>' +
+    (profile ? ' · ' + profile : '') + '<pre>' + escapeHtml(snap.output || '') + '</pre>';
 }
 
 function pollJob(id, verb, profile) {
   fetch('/api/jobs/' + id).then(r => r.json()).then(snap => {
     renderJob(id, verb, profile, snap);
-    if (snap.state === 'running') {
-      pollers[id] = setTimeout(() => pollJob(id, verb, profile), 1000);
-    } else {
-      refreshStatus();  // terminal state — refresh the dashboard
-    }
+    if (snap.state === 'running') { pollers[id] = setTimeout(() => pollJob(id, verb, profile), 1000); }
+    else { refreshStatus(); refreshProfiles(); }
   });
 }
 
-function escapeHtml(s) {
-  return s.replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+// --- profiles ---
+async function refreshProfiles() {
+  try {
+    const r = await fetch('/api/profiles');
+    const names = await r.json();
+    if (!names.length) { $('profiles').innerHTML = '<span class="sub">none — run: daybox init</span>'; return; }
+    $('profiles').innerHTML = '';
+    for (const name of names) {
+      const div = document.createElement('div');
+      div.innerHTML = '<b>' + name + '</b> <button data-seed="' + name + '">view/edit seed</button>';
+      div.querySelector('button').addEventListener('click', () => toggleSeedEditor(div, name));
+      $('profiles').appendChild(div);
+    }
+  } catch (e) { $('profiles').innerHTML = '<span class="sub">error: ' + e + '</span>'; }
 }
 
+function toggleSeedEditor(div, name) {
+  const existing = div.querySelector('textarea');
+  if (existing) { div.removeChild(existing.parentElement); return; }
+  fetch('/api/profiles/' + name + '/seed').then(r => r.text()).then(seed => {
+    const wrap = document.createElement('div'); wrap.style.marginTop = '.25rem';
+    const ta = document.createElement('textarea'); ta.value = seed;
+    const tools = document.createElement('div'); tools.className = 'seed-tools';
+    const save = document.createElement('button'); save.textContent = 'save';
+    const cancel = document.createElement('button'); cancel.textContent = 'cancel';
+    const msg = document.createElement('span'); msg.className = 'sub';
+    save.addEventListener('click', () => {
+      fetch('/api/profiles/' + name + '/seed', {
+        method: 'PUT', body: ta.value,
+      }).then(r => r.ok ? r.text() : r.text().then(t => Promise.reject(t)))
+        .then(t => { msg.textContent = '✓ ' + t; msg.style.color = '#2a7'; })
+        .catch(e => { msg.textContent = '✗ ' + e; msg.style.color = '#b00'; });
+    });
+    cancel.addEventListener('click', () => div.removeChild(wrap));
+    tools.append(save, cancel, msg);
+    wrap.append(ta, tools);
+    div.appendChild(wrap);
+  });
+}
+
+// --- proposals ---
+async function refreshProposals() {
+  try {
+    const r = await fetch('/api/proposals');
+    const props = await r.json();
+    if (!props.length) { $('proposals').innerHTML = '<span class="sub">none pending</span>'; return; }
+    $('proposals').innerHTML = '';
+    for (const p of props) {
+      const div = document.createElement('div');
+      div.id = 'prop-' + p.id;
+      div.innerHTML = '<b>' + p.id + '</b> → profile <b>' + p.profile + '</b> ' +
+        '<button data-act="diff">view diff</button> ' +
+        '<button data-act="accept">accept</button> ' +
+        '<button data-act="reject" class="danger">reject</button> ' +
+        '<div class="diff-area"></div>';
+      div.querySelector('[data-act="diff"]').addEventListener('click', () => loadDiff(div, p));
+      div.querySelector('[data-act="accept"]').addEventListener('click', () => actProposal(p, 'accept'));
+      div.querySelector('[data-act="reject"]').addEventListener('click', () => actProposal(p, 'reject'));
+      $('proposals').appendChild(div);
+    }
+  } catch (e) { $('proposals').innerHTML = '<span class="sub">error: ' + e + '</span>'; }
+}
+
+function loadDiff(div, p) {
+  const area = div.querySelector('.diff-area');
+  if (area.innerHTML) { area.innerHTML = ''; return; }
+  fetch('/api/proposals/' + p.id).then(r => r.json()).then(res => {
+    area.innerHTML = '<pre class="diff">' + res.diff.split('\n').map(l =>
+      l.startsWith('+') ? '<span class="diff-add">' + escapeHtml(l) + '</span>' :
+      l.startsWith('-') ? '<span class="diff-del">' + escapeHtml(l) + '</span>' :
+      escapeHtml(l)
+    ).join('\n') + '</pre>';
+  });
+}
+
+function actProposal(p, action) {
+  if (!confirm(action + ' proposal ' + p.id + ' (profile: ' + p.profile + ')?')) return;
+  fetch('/api/proposals/' + p.id + '/' + action, {
+    method: 'POST', headers: { 'Confirm': 'yes' },
+  }).then(r => r.text()).then(t => {
+    alert(t);
+    refreshProposals(); refreshProfiles(); refreshStatus();
+  });
+}
+
+// --- wire up ---
 document.querySelectorAll('button[data-verb]').forEach(b => b.addEventListener('click', () => startVerb(b.dataset.verb)));
-refreshStatus();
+refreshStatus(); refreshProfiles(); refreshProposals();
 setInterval(refreshStatus, 10000);
+setInterval(refreshProposals, 15000);
 </script>
 </body>
 </html>
