@@ -117,6 +117,31 @@ and the control plane (see [The net](#the-net)). The box's host key is the
 same over every path — take the `HOSTKEY` line from `daybox up` output, host
 field `daybox`.
 
+## Control-plane UI
+
+The control plane can serve a small web UI (`daybox ui`, default-on) that
+wraps the everyday verbs — `status`, `up`, `down`, `reap` — so you can see
+and manage your boxes from a browser without the laptop CLI. It is a thin
+wrapper, not a reimplementation: the handler runs the same `daybox` binary,
+with the same command grammar, that the laptop delegates over ssh. `up`
+from the UI passes `--detach` (summon, don't connect — a browser has no
+tty), so it summons and reports rather than dropping you into a shell.
+
+**daybox provides a UI, not an edge.** The daemon binds `127.0.0.1:4748`
+and nothing else; how that listener is exposed — public internet, private
+net, TLS, auth — is the **hoster's** job (a reverse proxy, a Cloudflare
+Tunnel, their own net). daybox ships no TLS, no auth, no CSRF protection:
+those live in whatever fronting layer the hoster runs. Default-on is safe
+by construction — the listener is local-only, so nothing reaches it
+without a fronting layer the hoster deliberately put there. A reachable UI
+can drive the full verb surface (billable `up`, destructive `down`/`reap`),
+so front it deliberately; see [SECURITY.md](SECURITY.md).
+
+Long-running verbs (`up` takes ~60-90s) run as polled jobs with a
+confirmation guard on the destructive ones. It runs as a systemd user
+service (`daybox-ui.service`, enabled by `install.sh`) alongside the relay
+and reaper.
+
 ## How it works
 
 ### Roles

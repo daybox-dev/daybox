@@ -74,12 +74,30 @@ below is a consequence of those three sentences.
   as an inert file. Review happens on the laptop as a full diff with
   `[setup]`/`[persist]` changes flagged — the supply-chain-bearing lines are
   impossible to skim past — and nothing takes effect until you accept.
-  Honestly said: the relay is the first custom resident daemon on the
-  control plane (everything else there is headscale + sshd + a timer), and
+  Honestly said: the relay was the first custom resident daemon on the
+  control plane (everything else there was headscale + sshd + a timer; the
+  web UI below is the second), and
   the node→profile binding is only as strong as the net identity a
   root-compromised box holds — which is why the relay's ceiling is proposal
   spam, never an applied change. The human diff review is the boundary; the
   relay just does the paperwork.
+- **A control-plane web UI — localhost; the hoster owns the edge.** `daybox
+  ui` (default-on, like the relay) serves a small HTTP surface at
+  `127.0.0.1:4748` that wraps the everyday verbs (`status`/`up`/`down`/`reap`),
+  so an operator can manage boxes from a browser without the laptop CLI.
+  daybox provides a UI, not an edge: the daemon binds loopback only, and
+  whatever exposes it to a network — a reverse proxy, a tunnel, their own
+  net, plus the TLS/auth/CSRF that goes with it — is the **hoster's** layer;
+  daybox ships none of it. This is deliberate: a reachable UI can drive the
+  full verb surface (billable `up` at real €/hr, destructive `down`/`reap`,
+  `keep edit`), so its blast radius is the whole plane — not proposal spam
+  like the relay, which is why daybox binds it localhost and makes the
+  hoster own the exposure rather than opening a listener itself. The
+  confirmation header on state-changing verbs is a fat-finger guard, not an
+  auth boundary (it assumes nothing about who's calling). daybox's own
+  listeners stay private — the relay is tsnet-only, the UI is loopback-only;
+  any public reachability is created by the hoster's fronting layer, not by
+  daybox.
 - **A box may declare its own keep-signals; the caps bound the spend.** The
   idle reaper's file-freshness signals (keep.toml) live on the box's
   persistent volume and are writable by the box — no approval, because keep
