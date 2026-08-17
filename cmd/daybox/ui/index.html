@@ -137,8 +137,9 @@ async function refreshProfiles() {
     $('profiles').innerHTML = '';
     for (const name of names) {
       const div = document.createElement('div');
-      div.innerHTML = '<b>' + name + '</b> <button data-seed="' + name + '">view/edit seed</button>';
-      div.querySelector('button').addEventListener('click', () => toggleSeedEditor(div, name));
+      div.innerHTML = '<b>' + name + '</b> <button data-seed="' + name + '">view/edit seed</button> <button data-keep="' + name + '">view/edit keep</button>';
+      div.querySelector('[data-seed]').addEventListener('click', () => toggleSeedEditor(div, name));
+      div.querySelector('[data-keep]').addEventListener('click', () => toggleKeepEditor(div, name));
       $('profiles').appendChild(div);
     }
   } catch (e) { $('profiles').innerHTML = '<span class="sub">error: ' + e + '</span>'; }
@@ -165,6 +166,38 @@ function toggleSeedEditor(div, name) {
     tools.append(save, cancel, msg);
     wrap.append(ta, tools);
     div.appendChild(wrap);
+  });
+}
+
+// --- keep (lives on the box, not the plane — needs a live box) ---
+function toggleKeepEditor(div, name) {
+  const existing = div.querySelector('textarea[data-keep]');
+  if (existing) { div.removeChild(existing.parentElement); return; }
+  fetch('/api/keep/' + name).then(r => {
+    if (!r.ok) return r.text().then(t => Promise.reject(t));
+    return r.text();
+  }).then(keep => {
+    const wrap = document.createElement('div'); wrap.style.marginTop = '.25rem';
+    const ta = document.createElement('textarea'); ta.dataset.keep = '1'; ta.value = keep;
+    const tools = document.createElement('div'); tools.className = 'seed-tools';
+    const save = document.createElement('button'); save.textContent = 'save';
+    const cancel = document.createElement('button'); cancel.textContent = 'cancel';
+    const msg = document.createElement('span'); msg.className = 'sub';
+    save.addEventListener('click', () => {
+      fetch('/api/keep/' + name, { method: 'PUT', body: ta.value })
+        .then(r => r.ok ? r.text() : r.text().then(t => Promise.reject(t)))
+        .then(t => { msg.textContent = '✓ ' + t; msg.style.color = '#2a7'; })
+        .catch(e => { msg.textContent = '✗ ' + e; msg.style.color = '#b00'; });
+    });
+    cancel.addEventListener('click', () => div.removeChild(wrap));
+    tools.append(save, cancel, msg);
+    wrap.append(ta, tools);
+    div.appendChild(wrap);
+  }).catch(e => {
+    const msg = document.createElement('div'); msg.className = 'sub'; msg.style.color = '#b00';
+    msg.textContent = '✗ ' + e + ' (keep.toml lives on the box — needs a running box)';
+    div.appendChild(msg);
+    setTimeout(() => div.removeChild(msg), 5000);
   });
 }
 

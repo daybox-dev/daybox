@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-var nopExec = func(c Command, w io.Writer) error { return nil }
+var nopExec = func(c Command, w io.Writer, _ io.Reader) error { return nil }
 
 // setupProfile writes a profile.toml into store/<name>/.
 func setupProfile(t *testing.T, store, name, seed string) {

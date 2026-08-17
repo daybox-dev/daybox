@@ -15,7 +15,7 @@ import (
 // seam relayMux(whoisNode, store) gives the relay.
 func TestUIStatus(t *testing.T) {
 	var got Command
-	mux := uiMux(func(c Command, w io.Writer) error {
+	mux := uiMux(func(c Command, w io.Writer, _ io.Reader) error {
 		got = c
 		io.WriteString(w, "profile 'default':\n  no box running\n")
 		return nil
@@ -39,7 +39,7 @@ func TestUIStatus(t *testing.T) {
 // TestUIStatusExecError: a failing exec surfaces as 500, not a 200 with
 // partial output.
 func TestUIStatusExecError(t *testing.T) {
-	mux := uiMux(func(c Command, w io.Writer) error {
+	mux := uiMux(func(c Command, w io.Writer, _ io.Reader) error {
 		return fmt.Errorf("boom")
 	}, "")
 	req := httptest.NewRequest("GET", "/api/status", nil)
@@ -52,7 +52,7 @@ func TestUIStatusExecError(t *testing.T) {
 
 // TestUIDashboard: GET / serves the embedded dashboard HTML.
 func TestUIDashboard(t *testing.T) {
-	mux := uiMux(func(c Command, w io.Writer) error { return nil }, "")
+	mux := uiMux(func(c Command, w io.Writer, _ io.Reader) error { return nil }, "")
 	req := httptest.NewRequest("GET", "/", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)

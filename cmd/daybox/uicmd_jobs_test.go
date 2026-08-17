@@ -19,7 +19,7 @@ func controllableExec(t *testing.T, got *Command) (uiExec, chan<- struct{}, <-ch
 	started := make(chan struct{})
 	release := make(chan struct{})
 	var once sync.Once
-	exec := func(c Command, w io.Writer) error {
+	exec := func(c Command, w io.Writer, _ io.Reader) error {
 		*got = c
 		once.Do(func() { close(started) }) // idempotent: multi-job tests start >1 exec
 		<-release
@@ -139,7 +139,7 @@ func TestUIJobConflict(t *testing.T) {
 }
 
 func TestUIJobUnknown(t *testing.T) {
-	mux := uiMux(func(c Command, w io.Writer) error { return nil }, "")
+	mux := uiMux(func(c Command, w io.Writer, _ io.Reader) error { return nil }, "")
 	req := httptest.NewRequest("GET", "/api/jobs/nope", nil)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)

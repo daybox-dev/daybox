@@ -42,7 +42,7 @@ const uiDefaultPort = 4748 // relay is 4747; the UI takes the next one
 // returns the subprocess error. Injected into uiMux so handlers are
 // unit-testable without a binary. Combined output matters for jobs: the
 // narration (`say` writes to stderr) IS the progress stream.
-type uiExec func(c Command, w io.Writer) error
+type uiExec func(c Command, w io.Writer, stdin io.Reader) error
 
 // uiMux is the UI's whole HTTP surface. exec is injected (testability, like
 // relayMux's whoisNode); store is the profiles dir, unused by the current
@@ -58,7 +58,7 @@ func uiMux(exec uiExec, store string) *http.ServeMux {
 		// wraps `daybox status` (all profiles). ?profile= scoping comes later.
 		c, _ := Parse([]string{"status"}, globalFlags)
 		var buf bytes.Buffer
-		if err := exec(c, &buf); err != nil {
+		if err := exec(c, &buf, nil); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -78,6 +78,10 @@ func uiMux(exec uiExec, store string) *http.ServeMux {
 	mux.HandleFunc("GET /api/proposals/{id}", proposalGetHandler(store))
 	mux.HandleFunc("POST /api/proposals/{id}/accept", proposalAcceptHandler(store))
 	mux.HandleFunc("POST /api/proposals/{id}/reject", proposalRejectHandler(store))
+
+	// keep — wraps the plane's internal keep cat/put (ssh to the box).
+	mux.HandleFunc("GET /api/keep/{name}", keepGetHandler(exec))
+	mux.HandleFunc("PUT /api/keep/{name}", keepPutHandler(exec))
 	return mux
 }
 
@@ -104,7 +108,7 @@ func cmdUI(p Parsed) {
 // the absolute path). Combined stdout+stderr so the job stream sees the
 // narration. It is wiring (untested, like the relay's listener);
 // commandArgv is the tested pure part.
-func realExec(c Command, w io.Writer) error {
+func realExec(c Command, w io.Writer, stdin io.Reader) error {
 	exe, err := os.Executable()
 	if err != nil {
 		return err
@@ -112,6 +116,7 @@ func realExec(c Command, w io.Writer) error {
 	cmd := exec.Command(exe, commandArgv(c)...)
 	cmd.Stdout = w
 	cmd.Stderr = w
+	cmd.Stdin = stdin
 	return cmd.Run()
 }
 
@@ -213,7 +218,7 @@ func (s *jobStore) start(c Command, profile string) (string, error) {
 }
 
 func (s *jobStore) run(j *job, c Command) {
-	if err := s.exec(c, j); err != nil {
+	if err := s.exec(c, j, nil); err != nil {
 		j.mu.Lock()
 		j.state = jobFailed
 		j.mu.Unlock()
