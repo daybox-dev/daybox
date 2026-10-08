@@ -162,10 +162,20 @@ rm -rf "$PAYDIR"; mkdir -p "$PAYDIR/dist"
 # CLI runs on the plane as well as the laptop. The payload carries the
 # runtime files the binary dereferences from $REPO_DIR (cloud-init template,
 # remote/ box-provisioning files, keys/ fallback) + the binary itself.
+#
+# TRACKED files only, straight out of HEAD via git archive (HEAD is enforced
+# clean-at-tag above, so HEAD == the tracked tree). This used to `cp -R` the
+# working tree, which also copied git-ignored files: a stray
+# remote/__pycache__/*.pyc embedded the maintainer's absolute laptop path and
+# shipped in every laptop-cut release from at least v0.4.0 — the denylist
+# scan only covers tracked files, so nothing caught it.
+PAYPATHS=""
 for p in remote systemd cloud-init headscale keys \
          profile.default.toml install.sh README.md SECURITY.md LICENSE; do
-    [ -e "$ROOT/$p" ] && cp -R "$ROOT/$p" "$PAYDIR/"
+    [ -n "$(git ls-files -- "$p")" ] && PAYPATHS="$PAYPATHS $p"
 done
+# shellcheck disable=SC2086 # word-splitting the path list is the point
+git archive --format=tar HEAD -- $PAYPATHS | tar -xf - -C "$PAYDIR"
 # the single Go binary: the plane's daybox AND the daybox-agent (same binary)
 cp "$DIST/$BIN-linux-amd64"            "$PAYDIR/dist/$BIN-linux-amd64"
 cp "$DIST/$BIN-linux-amd64"            "$PAYDIR/dist/$BIN-agent-linux-amd64"
@@ -183,8 +193,15 @@ for req in remote/controlplane-setup.sh install.sh \
         exit 1
     }
 done
-# NB: not byte-reproducible (tar/gzip embed mtimes). Integrity comes from the
-# signature over SHA256SUMS, not from rebuilding this identically.
+# Belt and braces for the leak above: nothing shipped may carry this
+# machine's home path — not a payload file, not a binary (-trimpath should
+# keep them clean; this proves it). -a so binary files are searched too.
+if LC_ALL=C grep -rlaF "$HOME/" "$PAYDIR" "$DIST/$BIN"-darwin-* "$DIST/$BIN"-linux-* >&2; then
+    echo "refusing to package: the files above contain this machine's home path ($HOME/)" >&2
+    exit 1
+fi
+# NB: not byte-reproducible (tar/gzip embed mtimes and owner names). Integrity
+# comes from the signature over SHA256SUMS, not from rebuilding this identically.
 tar -C "$PAYDIR" -czf "$DIST/$BIN-controlplane.tar.gz" .
 rm -rf "$PAYDIR"
 
