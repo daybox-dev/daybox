@@ -202,8 +202,27 @@ if LC_ALL=C grep -rlaF "$HOME/" "$PAYDIR" "$DIST/$BIN"-darwin-* "$DIST/$BIN"-lin
 fi
 # NB: not byte-reproducible (tar/gzip embed mtimes and owner names). Integrity
 # comes from the signature over SHA256SUMS, not from rebuilding this identically.
-tar -C "$PAYDIR" -czf "$DIST/$BIN-controlplane.tar.gz" .
+# COPYFILE_DISABLE + --no-xattrs: macOS bsdtar otherwise adds an AppleDouble
+# ._<name> entry per file carrying its xattrs (provenance, quarantine) — every
+# laptop-cut release through v0.5.1 shipped ~26 of them. GNU tar ignores the
+# env var and accepts the flag. bsdtar also HIDES ._ entries from `tar -t`
+# (under every flag), so the check below lists member names with Python's
+# tarfile, which shows them as stored.
+COPYFILE_DISABLE=1 tar --no-xattrs -C "$PAYDIR" -czf "$DIST/$BIN-controlplane.tar.gz" .
 rm -rf "$PAYDIR"
+if command -v python3 >/dev/null 2>&1; then
+    python3 -I -c '
+import sys, tarfile
+bad = [n for n in tarfile.open(sys.argv[1]).getnames()
+       if n.startswith("._") or "/._" in n or "__pycache__" in n or n.endswith(".pyc")]
+print("\n".join(bad), file=sys.stderr)
+sys.exit(1 if bad else 0)' "$DIST/$BIN-controlplane.tar.gz" || {
+        echo "refusing to ship: the control-plane payload contains the junk entries above" >&2
+        exit 1
+    }
+else
+    echo "  (no python3: skipped the ._/__pycache__ check on the control-plane payload)" >&2
+fi
 
 # ---- source drop ----
 # The publication itself: the exact tagged tree via git archive — no
