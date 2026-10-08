@@ -44,12 +44,12 @@
 #   /dl/latest/...                      same set; the current release
 #
 # --------------------------------------------------------------- deploy -----
-# On the trusted laptop (never CI — SECURITY.md, "no automated release
-# pipeline, ever"):
+# By hand on a maintainer machine — the laptop or the control plane (never
+# CI — SECURITY.md, "no automated release pipeline, ever"):
 #   scripts/release.sh v0.1.0   # cut + sign + upload to R2 + verify, one command
 # (scripts/cut.sh v0.1.0 builds the artifacts alone — offline, reproducible;
-#  release.sh calls it, then signs SHA256SUMS with the release key whose
-#  secret half never leaves the laptop, and publishes under /dl/<version>/
+#  release.sh calls it, then signs SHA256SUMS with the release key, only for
+#  a tag already on origin/main, and publishes under /dl/<version>/
 #  + /dl/latest/ plus this installer at site/install.sh.)
 #
 # NB: install.sh is deliberately NOT listed in SHA256SUMS — it pins that

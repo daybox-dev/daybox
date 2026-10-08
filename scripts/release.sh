@@ -10,29 +10,39 @@
 #
 # THIS IS NOT CI, AND MUST NOT BECOME CI. A release pipeline with publish
 # rights is precisely the supply-chain surface daybox defends against
-# (SECURITY.md, iron rule 3). This runs only on the trusted laptop, only
-# with a human y/N at the one irreversible step (the first R2 PUT), and
-# only for a version you name explicitly — there is no default-to-latest
-# footgun.
+# (SECURITY.md, iron rule 3). This runs only by hand on a maintainer machine
+# that holds the release key — the laptop or the control plane — only with a
+# human y/N at the one irreversible step (the first R2 PUT), and only for a
+# version you name explicitly — there is no default-to-latest footgun.
 #
-# Why the control plane uploads, not the laptop: the R2 credentials live
-# ONLY on the control plane (~/.config/daybox/r2, mode 600 — never copied,
-# never on the laptop, never in argv). So this script ships the signed
-# artifacts to the control plane over ssh and runs the PUTs there, the same
+# Why the control plane uploads: the R2 credentials live ONLY on the control
+# plane (~/.config/daybox/r2, mode 600 — never copied, never on the laptop,
+# never in argv). From the laptop, this script ships the signed artifacts to
+# the control plane over ssh and runs the PUTs there, the same
 # laptop-initiated / control-plane-credentialed shape `daybox upgrade` uses.
-# The signing key is the mirror case: its secret half lives ONLY in this
-# Mac's login Keychain, so signing happens on the laptop, never on the box.
+# Run on the control plane itself (no CONTROL_HOST, R2 creds present), the
+# same steps run locally — no laptop needed.
+#
+# The signing key: the laptop keeps its secret half in the login Keychain;
+# the control plane keeps a mode-600 key file. Either way the signature is
+# checked against the pinned public key before anything ships, and only a
+# tag that is already on origin/main gets signed — so every release is tied
+# to pushed history, wherever it was cut.
 #
 # Usage:
 #   scripts/release.sh v0.1.0        # cut (if needed) -> sign -> publish -> verify
 #
-# Prerequisites: a clean tree tagged <version> (cut.sh enforces this), the
-# minisign secret key in the Keychain (item 'daybox-release-signing'), and a
-# config.local with CONTROL_HOST set (the box with the R2 creds).
+# Prerequisites: a clean tree tagged <version> (cut.sh enforces this) and
+# pushed to origin/main; the minisign secret key — the file
+# ~/.config/daybox/release-signing.key (or $DAYBOX_RELEASE_KEY) if present,
+# else the Keychain item 'daybox-release-signing'; and either a config.local
+# with CONTROL_HOST set (the box with the R2 creds) or the R2 creds right here.
 set -euo pipefail
 
 BIN=daybox
 KEYCHAIN_ITEM=daybox-release-signing
+KEY_FILE="${DAYBOX_RELEASE_KEY:-$HOME/.config/daybox/release-signing.key}"
+R2_CREDS="$HOME/.config/daybox/r2"
 
 cd "$(dirname "$0")/.."
 ROOT=$(pwd)
@@ -62,10 +72,36 @@ SHKEY=$(sed -n 's/^DAYBOX_MINISIGN_PUBKEY="\([^"]*\)".*/\1/p' "$ROOT/web/install
 [ "$BINKEY" = "$SHKEY" ] || die "pinned keys differ between payload.go and install.sh — rotate BOTH, then cut"
 
 # The control plane: where the R2 creds live. Same host `daybox upgrade`
-# targets, read the same way.
-[ -f "$CONFIG" ] || die "no $CONFIG — this laptop has no deployment to publish from"
+# targets, read the same way. A plane has no CONTROL_HOST — it IS the host —
+# so no CONTROL_HOST plus local R2 creds means "publish from right here".
+[ -f "$CONFIG" ] || die "no $CONFIG — this machine has no deployment to publish from"
 CONTROL=$(sed -n 's/^CONTROL_HOST=//p' "$CONFIG" | tr -d '"' | head -1)
-[ -n "$CONTROL" ] || die "no CONTROL_HOST in $CONFIG — publish needs the box with the R2 creds"
+if [ -n "$CONTROL" ]; then
+    PLANE_DESC="$CONTROL (R2 creds live there)"
+elif [ -f "$R2_CREDS" ]; then
+    PLANE_DESC="this machine (R2 creds live here)"
+else
+    die "no CONTROL_HOST in $CONFIG and no $R2_CREDS — publish needs the box with the R2 creds"
+fi
+# plane <cmd> — run a shell command on the control plane: over ssh from a
+# laptop, directly when we are the plane. Joins its args into one command
+# string either way, exactly as ssh does.
+plane() {
+    if [ -n "$CONTROL" ]; then ssh -o BatchMode=yes "$CONTROL" "$*"
+    else bash -c "$*"; fi
+}
+
+# ---- 0. only pushed history gets signed ----
+# The installer trusts the signing key, not GitHub — so without this, the key
+# could sign a commit nobody pushed. Requiring the tag on origin/main (and the
+# tag itself pushed, unchanged) ties every signature to daybox-dev history.
+say "checking $VERSION is pushed and on origin/main"
+git -C "$ROOT" fetch -q origin main || die "could not fetch origin/main"
+TAG_OBJ=$(git -C "$ROOT" rev-parse -q --verify "refs/tags/$VERSION") || die "no local tag $VERSION"
+REMOTE_OBJ=$(git -C "$ROOT" ls-remote origin "refs/tags/$VERSION" | awk '{print $1}')
+[ "$REMOTE_OBJ" = "$TAG_OBJ" ] || die "tag $VERSION is not pushed (or differs from origin) — git push origin $VERSION"
+git -C "$ROOT" merge-base --is-ancestor "$VERSION^{commit}" origin/main \
+    || die "$VERSION is not on origin/main — push the commit to main first"
 
 # ---- 1. cut (idempotent: skip if this version's artifacts already exist) ----
 # Re-running release.sh for the same version (e.g. to re-verify after a
@@ -86,14 +122,19 @@ for f in $ARTIFACTS SHA256SUMS; do
     [ -f "$f" ] || die "dist/ is missing $f — re-run: scripts/cut.sh $VERSION"
 done
 
-# ---- 2. sign SHA256SUMS with the release key (Keychain-gated) ----
-# The secret key never touches disk in plaintext outside the signing instant.
+# ---- 2. sign SHA256SUMS with the release key ----
+# Key file if this machine has one (the control plane), else the Keychain (the
+# laptop) — where the secret never touches disk outside the signing instant.
 # The version: token is REQUIRED — 'daybox init' refuses a signed SHA256SUMS
 # that does not attest the version it was fetched for (rollback protection).
 if [ -f SHA256SUMS.minisig ] && minisign -Vm SHA256SUMS -x SHA256SUMS.minisig -P "$PUBKEY" >/dev/null 2>&1; then
     say "SHA256SUMS already signed for $VERSION (verifies against pinned key) — skipping sign"
+elif [ -f "$KEY_FILE" ]; then
+    say "signing SHA256SUMS (key file $KEY_FILE)"
+    minisign -Sm SHA256SUMS -s "$KEY_FILE" -t "file:SHA256SUMS version:$VERSION"
 else
     say "signing SHA256SUMS (Keychain item '$KEYCHAIN_ITEM')"
+    command -v security >/dev/null || die "no key file at $KEY_FILE and no Keychain here — nothing to sign with"
     KEYFILE=$(mktemp /tmp/daybox-ms.XXXXXX) || die "mktemp failed"
     chmod 600 "$KEYFILE"
     trap 'rm -f "$KEYFILE"' EXIT
@@ -102,19 +143,19 @@ else
     fi
     minisign -Sm SHA256SUMS -s "$KEYFILE" -t "file:SHA256SUMS version:$VERSION"
     rm -f "$KEYFILE"; trap - EXIT
-    # Verify our own signature against the pinned public key BEFORE shipping:
-    # a signature that doesn't verify here would fail every installer too.
-    minisign -Vm SHA256SUMS -x SHA256SUMS.minisig -P "$PUBKEY" >/dev/null \
-        || die "signature does not verify against the pinned key — aborting before publish"
 fi
+# Verify our own signature against the pinned public key BEFORE shipping:
+# a signature that doesn't verify here would fail every installer too.
 [ -f SHA256SUMS.minisig ] || die "no SHA256SUMS.minisig"
+minisign -Vm SHA256SUMS -x SHA256SUMS.minisig -P "$PUBKEY" >/dev/null \
+    || die "signature does not verify against the pinned key — aborting before publish"
 
 # ---- 3. approval: the one irreversible step ----
 echo
 echo "About to publish $VERSION to R2 (daybox.dev):"
 echo "  /dl/$VERSION/  and  /dl/latest/   (artifacts + signed sums)"
 echo "  /install.sh                       (pins $VERSION)"
-echo "  control plane: $CONTROL (R2 creds live here)"
+echo "  control plane: $PLANE_DESC"
 echo
 read -rp "publish $VERSION to R2? [y/N] " ans
 [ "$ans" = "y" ] || die "aborted — dist/ is signed and ready; re-run to publish"
@@ -123,17 +164,17 @@ read -rp "publish $VERSION to R2? [y/N] " ans
 # COPYFILE_DISABLE kills the ._appleDouble + LIBARCHIVE.xattr noise that
 # otherwise rides tar out of macOS and lands as junk in the staging dir.
 STAGE="release-staging/$VERSION"
-say "shipping artifacts to $CONTROL:$STAGE"
+say "staging artifacts at ${CONTROL:-this machine}:~/$STAGE"
 COPYFILE_DISABLE=1 tar czf - $ARTIFACTS SHA256SUMS SHA256SUMS.minisig install.sh \
-    | ssh -o BatchMode=yes "$CONTROL" "rm -rf ~/$STAGE && mkdir -p ~/$STAGE && tar xzf - -C ~/$STAGE" \
-    || die "shipping artifacts to $CONTROL failed"
+    | plane "rm -rf ~/$STAGE && mkdir -p ~/$STAGE && tar xzf - -C ~/$STAGE" \
+    || die "staging artifacts on ${CONTROL:-this machine} failed"
 
-say "uploading to R2 from $CONTROL (creds stay there)"
-# Quoted heredoc: nothing expands on the laptop; $1 carries VERSION to the
-# remote shell, the R2 creds are sourced on the box. The worker strips /dl/
+say "uploading to R2 from ${CONTROL:-this machine} (creds stay there)"
+# Quoted heredoc: nothing expands here; $1 carries VERSION to the plane's
+# shell, the R2 creds are sourced on the plane. The worker strips /dl/
 # from the URL, so bucket keys are <version>/<file> and latest/<file> — NO
 # dl/ prefix (an upload to dl/... keys is silently never served; it bit once).
-ssh -o BatchMode=yes "$CONTROL" 'bash -s' "$VERSION" <<'UPLOAD'
+plane 'bash -s' "$VERSION" <<'UPLOAD'
 set -euo pipefail
 VERSION=$1
 . ~/.config/daybox/r2
@@ -177,8 +218,16 @@ say "uploaded"
 # the live release is provably the one we just signed.
 say "verifying the live release"
 SITE=https://daybox.dev
-sha() { shasum -a 256 | cut -d' ' -f1; }   # reads stdin
+sha() { if command -v sha256sum >/dev/null; then sha256sum; else shasum -a 256; fi | cut -d' ' -f1; }   # reads stdin
 FAIL=0
+# The binary we download and run must be one this machine can execute.
+case "$(uname -s)/$(uname -m)" in
+    Darwin/arm64)               NATIVE=darwin-arm64 ;;
+    Darwin/x86_64)              NATIVE=darwin-amd64 ;;
+    Linux/x86_64)               NATIVE=linux-amd64 ;;
+    Linux/aarch64|Linux/arm64)  NATIVE=linux-arm64 ;;
+    *) die "don't know which release binary runs on $(uname -s)/$(uname -m)" ;;
+esac
 
 # local sums hash (what install.sh must pin)
 SUMS_SHA=$(sha < SHA256SUMS)
@@ -223,10 +272,10 @@ else
 fi
 
 # one binary: sha matches sums AND it runs as this version
-curl -fsS "$SITE/dl/latest/$BIN-darwin-arm64" -o /tmp/release-vfy.bin || vfail "GET binary"
+curl -fsS "$SITE/dl/latest/$BIN-$NATIVE" -o /tmp/release-vfy.bin || vfail "GET binary"
 if [ -s /tmp/release-vfy.bin ]; then
     BIN_SHA=$(sha < /tmp/release-vfy.bin)
-    WANT_SHA=$(grep " $BIN-darwin-arm64$" SHA256SUMS | awk '{print $1}')
+    WANT_SHA=$(grep " $BIN-$NATIVE$" SHA256SUMS | awk '{print $1}')
     if [ "$BIN_SHA" = "$WANT_SHA" ]; then vok "binary sha matches SHA256SUMS"
     else vfail "binary sha $BIN_SHA != sums $WANT_SHA"; fi
     GOT_VER=$(chmod +x /tmp/release-vfy.bin 2>/dev/null; /tmp/release-vfy.bin version 2>/dev/null || true)

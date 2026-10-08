@@ -7,8 +7,9 @@
 # THIS IS NOT CI, AND MUST NOT BECOME CI. A release pipeline with publish
 # rights is precisely the supply-chain surface daybox defends against
 # (SECURITY.md, iron rule 3). Artifacts are cross-compiled and checksummed
-# here on the trusted laptop; scripts/release.sh signs, publishes, and
-# verifies them — also on the laptop, also never CI.
+# here, by hand, on a maintainer machine (the laptop or the control plane);
+# scripts/release.sh signs, publishes, and verifies them — same machine,
+# also never CI.
 #
 # Usage:
 #   scripts/cut.sh v0.1.0        # stamp this version

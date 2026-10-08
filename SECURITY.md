@@ -151,16 +151,17 @@ closed and the box is yours.
 The GitHub repo is the trust root — whoever can push to it can run code on
 every machine that pulls it. Two consequences we take seriously:
 
-- **The control plane holds no push credential.** Its tree is *pushed to it*
-  by `daybox init` over ssh from your device; there is no GitHub write
-  credential on the always-on box, so compromising it cannot push tooling
-  changes back upstream. The push credential lives only on the trusted
-  laptop and is a crown jewel; protect the GitHub account accordingly.
-- **No automated release pipeline, ever.** Release binaries are
-  cross-compiled and checksummed **locally on the trusted laptop** and
-  uploaded deliberately — never built by CI. A CI pipeline with publish
-  rights is exactly the Shai-Hulud attack surface we're defending against;
-  we refuse to add one.
+- **The control plane needs no push credential.** Its tree is *pushed to
+  it* by `daybox init` over ssh from your device, so a deployment never puts
+  a GitHub write credential on the always-on box, and compromising one
+  cannot push tooling changes back upstream. The daybox project's own push
+  credential is a crown jewel: its maintainer keeps it on their laptop and
+  their own control plane, and protects the GitHub account accordingly.
+- **No automated release pipeline, ever.** Releases are cut, signed, and
+  uploaded **by hand** by the maintainer, from their laptop or their own
+  control plane — never by CI — and only from a tag already pushed to
+  `main`. A CI pipeline with publish rights is exactly the Shai-Hulud
+  attack surface we're defending against; we refuse to add one.
 - **The bootstrap trust root, honestly.** For `curl daybox.dev/install.sh |
   sh`, the trust root is the domain, its TLS, and the credential that can
   write to the artifact store — the served installer and the artifacts it
