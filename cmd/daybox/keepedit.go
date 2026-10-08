@@ -56,7 +56,7 @@ func cmdKeepEdit(p Parsed) {
 		name = n
 	}
 	if !validProfileName(name) {
-		log.Fatalf("invalid profile '%s' (lowercase letters, digits, dashes)", name)
+		log.Fatalf("invalid profile '%s' (%s)", name, profileNameRule)
 	}
 	current, err := fetchKeep(host, name)
 	if err != nil {

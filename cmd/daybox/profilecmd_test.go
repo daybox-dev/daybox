@@ -79,12 +79,15 @@ func TestValidateProfileRejectsBrokenTOML(t *testing.T) {
 }
 
 func TestValidProfileName(t *testing.T) {
-	for _, good := range []string{"default", "daybox", "a-1"} {
+	for _, good := range []string{"default", "daybox", "a-1", "argos-carbon", "0x"} {
 		if !validProfileName(good) {
 			t.Errorf("%q should be valid", good)
 		}
 	}
-	for _, bad := range []string{"", "Big", "a_b", "a b", "a'b", "a/b", "café"} {
+	// dash-first names are flag-shaped: `profile add --help` once created a
+	// profile literally named "--help".
+	for _, bad := range []string{"", "Big", "a_b", "a b", "a'b", "a/b", "café",
+		"--help", "-h", "--purge", "-", "-a", "..", "."} {
 		if validProfileName(bad) {
 			t.Errorf("%q should be invalid", bad)
 		}

@@ -8,9 +8,10 @@ package main
 // of live vs proposed — the diff shows *everything* the box wants, and
 // [setup]/[persist] lines are flagged loudly because they are the
 // supply-chain-bearing surface ([setup] once runs verbatim as commands).
-// Approval is a laptop-side action: `accept` re-validates, shows the diff,
-// confirms, then replaces the live seed (with the same backup discipline as
-// `profile edit`). The control plane stores; it never approves.
+// Approval is a human action — from the laptop, or a shell on the plane
+// itself (seedStore picks ssh or local files) — never the box's: `accept`
+// re-validates, shows the diff, confirms, then replaces the live seed (with
+// the same backup discipline as `profile edit`). The relay only stores.
 
 import (
 	"bufio"
@@ -84,8 +85,8 @@ func listProposals(host string) ([]proposal, error) {
 
 // findProposal resolves an id (unique by construction: the relay mints
 // timestamped names) to its profile.
-func findProposal(host, id string) (proposal, error) {
-	ps, err := listProposals(host)
+func findProposal(store seedStore, id string) (proposal, error) {
+	ps, err := store.proposals()
 	if err != nil {
 		return proposal{}, err
 	}
@@ -206,8 +207,8 @@ func renderProposalDiff(current, proposed string) string {
 
 // cmdProfileProposals: list every pending proposal with its review diff.
 func cmdProfileProposals(args []string) {
-	host := mustControl()
-	ps, err := listProposals(host)
+	store := openSeedStore()
+	ps, err := store.proposals()
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -216,11 +217,11 @@ func cmdProfileProposals(args []string) {
 		return
 	}
 	for _, p := range ps {
-		cur, err := fetchProfile(host, p.profile)
+		cur, err := store.fetch(p.profile)
 		if err != nil {
 			log.Fatal(err)
 		}
-		prop, err := sshCapture(host, "cat "+remoteProposalPath(p))
+		prop, err := store.readProposal(p)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -239,22 +240,22 @@ func cmdProfileAccept(args []string) {
 	if len(args) != 1 {
 		log.Fatal("usage: daybox profile accept <id>")
 	}
-	host := mustControl()
-	p, err := findProposal(host, args[0])
+	store := openSeedStore()
+	p, err := findProposal(store, args[0])
 	if err != nil {
 		log.Fatal(err)
 	}
-	cur, err := fetchProfile(host, p.profile)
+	cur, err := store.fetch(p.profile)
 	if err != nil {
 		log.Fatal(err)
 	}
-	prop, err := sshCapture(host, "cat "+remoteProposalPath(p))
+	prop, err := store.readProposal(p)
 	if err != nil {
 		log.Fatal(err)
 	}
 	if prop == cur {
 		say("proposal %s matches the live profile — nothing to apply", p.id)
-		rmProposal(host, p)
+		rmProposal(store, p)
 		return
 	}
 	// a box could submit anything; the same validator that gates an edit
@@ -271,10 +272,10 @@ func cmdProfileAccept(args []string) {
 		return
 	}
 	ts := time.Now().Format("20060102-150405")
-	if err := pushProfile(host, p.profile, prop, ts); err != nil {
+	if err := store.push(p.profile, prop, ts); err != nil {
 		log.Fatal(err)
 	}
-	rmProposal(host, p)
+	rmProposal(store, p)
 	say("profile '%s' updated (backup: profile.toml.bak.%s) — takes effect at the next daybox up", p.profile, ts)
 }
 
@@ -283,17 +284,17 @@ func cmdProfileReject(args []string) {
 	if len(args) != 1 {
 		log.Fatal("usage: daybox profile reject <id>")
 	}
-	host := mustControl()
-	p, err := findProposal(host, args[0])
+	store := openSeedStore()
+	p, err := findProposal(store, args[0])
 	if err != nil {
 		log.Fatal(err)
 	}
-	rmProposal(host, p)
+	rmProposal(store, p)
 	say("rejected proposal %s (profile '%s' unchanged)", p.id, p.profile)
 }
 
-func rmProposal(host string, p proposal) {
-	if err := sshRun(host, "rm -f "+remoteProposalPath(p)); err != nil {
+func rmProposal(store seedStore, p proposal) {
+	if err := store.dropProposal(p); err != nil {
 		log.Fatalf("could not remove proposal %s: %v", p.id, err)
 	}
 }
@@ -303,13 +304,14 @@ func rmProposal(host string, p proposal) {
 // without ever blocking the summon. Timeout, 'n', a non-tty stdin, or any
 // error here all mean "summon with the profile as it stands".
 func maybeOfferProposalReview(host, profileArg string) {
-	ps, err := listProposals(host)
+	store := remoteSeedStore{host: host}
+	ps, err := store.proposals()
 	if err != nil || len(ps) == 0 {
 		return
 	}
 	name := profileArg
 	if name == "" {
-		name, _ = remoteDefaultProfile(host) // "" on error: fall back to all
+		name, _ = store.defaultProfile() // "" on error: fall back to all
 	}
 	var mine []proposal
 	for _, p := range ps {
@@ -346,7 +348,7 @@ func maybeOfferProposalReview(host, profileArg string) {
 		return
 	}
 	if strings.HasPrefix(strings.ToLower(strings.TrimSpace(line)), "y") {
-		reviewProposals(host, mine, in)
+		reviewProposals(store, mine, in)
 	}
 }
 
@@ -369,28 +371,28 @@ func stdinReadable(d time.Duration) bool {
 // reviewProposals walks pending proposals one by one: diff, then
 // accept / reject / skip. Accepted ones replace the live profile NOW —
 // before the caller renders — so they apply to the box being summoned.
-func reviewProposals(host string, ps []proposal, in *bufio.Reader) {
+func reviewProposals(store seedStore, ps []proposal, in *bufio.Reader) {
 	for _, p := range ps {
-		cur, err := fetchProfile(host, p.profile)
+		cur, err := store.fetch(p.profile)
 		if err != nil {
 			say("%s: %v — skipping", p.id, err)
 			continue
 		}
-		prop, err := sshCapture(host, "cat "+remoteProposalPath(p))
+		prop, err := store.readProposal(p)
 		if err != nil {
 			say("%s: unreadable — skipping", p.id)
 			continue
 		}
 		if prop == cur {
 			say("%s matches the live profile — dropping it", p.id)
-			rmProposal(host, p)
+			rmProposal(store, p)
 			continue
 		}
 		fmt.Printf("%s → profile '%s'\n", p.id, p.profile)
 		if err := validateProfile(prop); err != nil {
 			say("NOT a valid profile (%v)", err)
 			if strings.HasPrefix(strings.ToLower(prompt(in, "reject it?", "y")), "y") {
-				rmProposal(host, p)
+				rmProposal(store, p)
 				say("rejected %s", p.id)
 			}
 			continue
@@ -399,13 +401,13 @@ func reviewProposals(host string, ps []proposal, in *bufio.Reader) {
 		switch strings.ToLower(prompt(in, "[a]ccept / [r]eject / [s]kip", "s")) {
 		case "a", "accept":
 			ts := time.Now().Format("20060102-150405")
-			if err := pushProfile(host, p.profile, prop, ts); err != nil {
+			if err := store.push(p.profile, prop, ts); err != nil {
 				log.Fatal(err)
 			}
-			rmProposal(host, p)
+			rmProposal(store, p)
 			say("accepted %s (backup: profile.toml.bak.%s) — applies to this summon", p.id, ts)
 		case "r", "reject":
-			rmProposal(host, p)
+			rmProposal(store, p)
 			say("rejected %s", p.id)
 		default:
 			say("skipped %s — it stays pending", p.id)

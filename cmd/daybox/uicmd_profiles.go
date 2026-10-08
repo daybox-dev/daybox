@@ -98,8 +98,13 @@ func trimSuffix(s, suffix string) string {
 // freeze into cloud-init user_data. Same discipline as pushProfile (laptop)
 // but plane-local.
 func writeSeedAtomic(store, name string, content []byte) error {
+	return writeSeedAtomicTS(store, name, content, time.Now().Format("20060102-150405"))
+}
+
+// writeSeedAtomicTS is writeSeedAtomic with the backup timestamp supplied,
+// so the CLI (localSeedStore.push) can name the backup it reports.
+func writeSeedAtomicTS(store, name string, content []byte, ts string) error {
 	live := filepath.Join(store, name, "profile.toml")
-	ts := time.Now().Format("20060102-150405")
 	if _, err := os.Stat(live); err == nil {
 		b, err := os.ReadFile(live)
 		if err != nil {

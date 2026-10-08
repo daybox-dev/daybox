@@ -29,7 +29,7 @@ var defaultSeed []byte
 // It never overwrites an existing profile.
 func profileAdd(dep *deployment, name, serverType string) error {
 	if !validProfileName(name) {
-		return fmt.Errorf("invalid profile '%s' (lowercase letters, digits, dashes)", name)
+		return fmt.Errorf("invalid profile '%s' (%s)", name, profileNameRule)
 	}
 	prov, err := dep.loadProvider(loadConfigFile(configPath()).get("PROVIDER", "hetzner"))
 	if err != nil {
@@ -161,8 +161,10 @@ func profileUse(dep *deployment, name string) error {
 // A live box would orphan the reaper counters + leave a net ghost, so the
 // box must be down first.
 func profileRename(dep *deployment, old, new string) error {
-	if !validProfileName(new) {
-		return fmt.Errorf("invalid profile '%s'", new)
+	for _, n := range []string{old, new} {
+		if !validProfileName(n) {
+			return fmt.Errorf("invalid profile '%s' (%s)", n, profileNameRule)
+		}
 	}
 	if !fileExists(filepath.Join(dep.stateDir, "profiles", old)) {
 		return fmt.Errorf("no such profile '%s'", old)
@@ -204,8 +206,13 @@ func profileRename(dep *deployment, old, new string) error {
 }
 
 // profileRm deletes a profile's box (if up), optionally its volume, then its
-// state + config (bash: profile_rm). The 'default' profile is protected.
-func profileRm(dep *deployment, name, purge string) error {
+// state + config (bash: profile_rm). The 'default' profile is protected, and
+// name is acted on exactly as given — it must already exist; there is no
+// fallback to the current or default profile.
+func profileRm(dep *deployment, name string, purge bool) error {
+	if !validProfileName(name) {
+		return fmt.Errorf("invalid profile '%s' (%s)", name, profileNameRule)
+	}
 	if name == "default" {
 		return fmt.Errorf("refusing to remove the 'default' profile")
 	}
@@ -230,7 +237,7 @@ func profileRm(dep *deployment, name, purge string) error {
 		}
 	}
 	vid, _ := p.volumeID()
-	if purge == "--purge" && vid != "" {
+	if purge && vid != "" {
 		say("deleting volume daybox-%s-vol (id %s) — workspace state is gone for good", name, vid)
 		if err := prov.VolumeDelete(vid); err != nil {
 			return err

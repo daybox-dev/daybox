@@ -184,7 +184,7 @@ func TestProfilePlaneRenameViaProfileFlag(t *testing.T) {
 // TestProfileRmProtectsDefault: 'default' cannot be removed.
 func TestProfileRmProtectsDefault(t *testing.T) {
 	d, _ := newU8Deployment(t)
-	if err := profileRm(d, "default", ""); err == nil {
+	if err := profileRm(d, "default", false); err == nil {
 		t.Error("rm must refuse the 'default' profile")
 	}
 }
@@ -198,7 +198,7 @@ func TestProfileRmReapsLiveBoxThenDeletesState(t *testing.T) {
 	prov.probeResult = &Server{ID: "9", Name: "daybox-gone", IP: "1.2.3.4", Type: "ccx33"} // live
 	// reuse a real-ish down: downBox will probe + reap; stub the unmount so it's fast
 	unmountWorkFn = func(p *profile, ip string) string { return "" }
-	if err := profileRm(d, "gone", ""); err != nil {
+	if err := profileRm(d, "gone", false); err != nil {
 		t.Fatal(err)
 	}
 	if fileExists(filepath.Join(d.stateDir, "profiles", "gone")) {
@@ -216,7 +216,7 @@ func TestProfileRmPurgeDeletesVolume(t *testing.T) {
 	os.MkdirAll(filepath.Join(d.stateDir, "profiles", "gone"), 0o755)
 	os.WriteFile(filepath.Join(d.stateDir, "profiles", "gone", "volume_id"), []byte("100"), 0o644)
 	unmountWorkFn = func(p *profile, ip string) string { return "" }
-	if err := profileRm(d, "gone", "--purge"); err != nil {
+	if err := profileRm(d, "gone", true); err != nil {
 		t.Fatal(err)
 	}
 	if len(prov.deleteCalls) != 1 || prov.deleteCalls[0] != "100" {

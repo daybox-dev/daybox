@@ -64,7 +64,8 @@ below is a consequence of those three sentences.
   of TOFU: an attacker in the network path during that first scan window
   could pin their own key. The window is seconds long, from the control
   plane's connection, against a box only it knows exists — but it exists.
-- **A box can propose a profile change; only your laptop can approve one.**
+- **A box can propose a profile change; only you can approve one** — from
+  the laptop, or a shell (or the UI) on the control plane; never the box.
   A profile's seed is root-at-boot on every future box, so a writable seed
   would be machine-persistence laundered through provisioning — the seed
   stays one-way. What a box *can* do is submit a proposal to the **agent

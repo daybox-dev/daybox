@@ -16,6 +16,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sort"
 	"strings"
 	"time"
@@ -25,9 +26,11 @@ import (
 
 // validProfileName mirrors bin/daybox's valid_profile_name: the name lands
 // inside remote shell commands and derived paths, so the character set is
-// the safety boundary, not just cosmetics.
+// the safety boundary, not just cosmetics. The first character must be a
+// letter or digit: a dash-led name is flag-shaped, and accepting one is how
+// `daybox profile add --help` created (and billed) a profile named "--help".
 func validProfileName(name string) bool {
-	if name == "" {
+	if name == "" || name[0] == '-' {
 		return false
 	}
 	for _, r := range name {
@@ -37,6 +40,9 @@ func validProfileName(name string) bool {
 	}
 	return true
 }
+
+// profileNameRule is the human form of validProfileName, for error messages.
+const profileNameRule = "lowercase letters, digits, dashes; starts with a letter or digit"
 
 // remoteSeedPath is the control-plane location of a profile's seed —
 // $HOME-relative because non-interactive ssh shells expand no ~ inside a
@@ -88,6 +94,85 @@ func sshFeed(host, cmd, content string) error {
 		c.Stdout, c.Stderr = os.Stdout, os.Stderr
 		return c.Run()
 	})
+}
+
+// seedStore is where profile seeds and their pending proposals live: the
+// control plane's ~/.config/daybox/profiles. The laptop reaches it over ssh;
+// on the plane itself the files are local. edit/proposals/accept/reject go
+// through this so they work in both roles — they used to call mustControl
+// unconditionally, which on the plane (no CONTROL_HOST: it IS the host)
+// died with "no control plane configured — run: daybox init".
+type seedStore interface {
+	defaultProfile() (string, error)
+	fetch(name string) (string, error)
+	push(name, content, ts string) error
+	proposals() ([]proposal, error)
+	readProposal(p proposal) (string, error)
+	dropProposal(p proposal) error
+}
+
+// openSeedStore picks the store for this machine's role (amPlane).
+func openSeedStore() seedStore {
+	if amPlane() {
+		return localSeedStore{dir: filepath.Join(confDir(), "profiles")}
+	}
+	return remoteSeedStore{host: mustControl()}
+}
+
+// remoteSeedStore is the laptop's view of the plane's store, over ssh.
+type remoteSeedStore struct{ host string }
+
+func (s remoteSeedStore) defaultProfile() (string, error) { return remoteDefaultProfile(s.host) }
+func (s remoteSeedStore) fetch(name string) (string, error) {
+	return fetchProfile(s.host, name)
+}
+func (s remoteSeedStore) push(name, content, ts string) error {
+	return pushProfile(s.host, name, content, ts)
+}
+func (s remoteSeedStore) proposals() ([]proposal, error) { return listProposals(s.host) }
+func (s remoteSeedStore) readProposal(p proposal) (string, error) {
+	return sshCapture(s.host, "cat "+remoteProposalPath(p))
+}
+func (s remoteSeedStore) dropProposal(p proposal) error {
+	return sshRun(s.host, "rm -f "+remoteProposalPath(p))
+}
+
+// localSeedStore is the plane's own store — the same plane-local file ops
+// the web UI uses (uicmd_profiles.go), with the same backup + temp+rename
+// discipline as pushProfile.
+type localSeedStore struct{ dir string } // ~/.config/daybox/profiles
+
+func (s localSeedStore) defaultProfile() (string, error) {
+	name, _ := loadDeployment().currentProfile("")
+	return name, nil
+}
+func (s localSeedStore) fetch(name string) (string, error) {
+	b, err := os.ReadFile(filepath.Join(s.dir, name, "profile.toml"))
+	if err != nil {
+		return "", fmt.Errorf("profile '%s' has no seed on the control plane — create it with: daybox profile seed init %s", name, name)
+	}
+	return string(b), nil
+}
+func (s localSeedStore) push(name, content, ts string) error {
+	return writeSeedAtomicTS(s.dir, name, []byte(content), ts)
+}
+func (s localSeedStore) proposals() ([]proposal, error) {
+	var ps []proposal
+	for _, pi := range listProposalsLocal(s.dir) {
+		ps = append(ps, proposal{profile: pi.Profile, id: pi.ID})
+	}
+	return ps, nil
+}
+func (s localSeedStore) readProposal(p proposal) (string, error) {
+	b, err := os.ReadFile(filepath.Join(s.dir, p.profile, "proposals", p.id+".toml"))
+	return string(b), err
+}
+func (s localSeedStore) dropProposal(p proposal) error {
+	err := os.Remove(filepath.Join(s.dir, p.profile, "proposals", p.id+".toml"))
+	if os.IsNotExist(err) {
+		return nil // rm -f semantics, like the remote store
+	}
+	return err
 }
 
 // profileKnownKeys is the seed's schema surface, kept in lockstep with
@@ -145,24 +230,23 @@ func validateProfile(src string) error {
 }
 
 // cmdProfileEdit: `daybox profile edit [name]` — the one profile subverb that
-// does not delegate: the editor runs here, on the laptop.
-func cmdProfileEdit(args []string) {
-	host := mustControl()
-	var name string
-	if len(args) > 0 {
-		name = args[0]
-	} else {
-		n, err := remoteDefaultProfile(host)
+// does not delegate: the editor runs here, where the user is (the laptop, or
+// a shell on the plane itself). name is the -p/positional target cmdProfile
+// resolved; "" means the current profile.
+func cmdProfileEdit(name string) {
+	store := openSeedStore()
+	if name == "" {
+		n, err := store.defaultProfile()
 		if err != nil {
 			log.Fatalf("could not resolve the default profile: %v", err)
 		}
 		name = n
 	}
 	if !validProfileName(name) {
-		log.Fatalf("invalid profile '%s' (lowercase letters, digits, dashes)", name)
+		log.Fatalf("invalid profile '%s' (%s)", name, profileNameRule)
 	}
 
-	current, err := fetchProfile(host, name)
+	current, err := store.fetch(name)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -206,7 +290,7 @@ func cmdProfileEdit(args []string) {
 	}
 
 	ts := time.Now().Format("20060102-150405")
-	if err := pushProfile(host, name, edited, ts); err != nil {
+	if err := store.push(name, edited, ts); err != nil {
 		log.Fatalf("push failed — your edit is preserved at %s: %v", tmpPath, err)
 	}
 	os.Remove(tmpPath)

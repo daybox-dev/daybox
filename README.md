@@ -337,7 +337,11 @@ daybox status                      # everything: ALL profiles' boxes + the net t
 ```
 
 `SERVER_NAME`/`VOLUME_NAME` are **derived** from the profile name
-(`daybox-<profile>` / `daybox-<profile>-vol`), never configured. Net
+(`daybox-<profile>` / `daybox-<profile>-vol`), never configured. A name is
+lowercase letters, digits and dashes, starting with a letter or digit;
+`-h`/`--help` anywhere in a `profile` command prints usage and acts on
+nothing, and `profile rm`/`rename` act only on the one profile named
+(never the current or default one). Net
 membership is deployment-wide (every profile's box joins the same headscale
 under a distinct name), so same net, different boxes, different creds.
 
@@ -410,10 +414,10 @@ seed is root-at-boot, and a writable one would launder machine-persistence
 through provisioning. But a box legitimately *discovers* drift (a tool
 installed mid-session, a pin that lags what's running), so it can submit a
 **proposal**: the control plane's relay (a default-on, net-side daemon)
-stages it as an inert file, and you review a full diff on the laptop
-(`daybox profile proposals` → `accept <id>` / `reject <id>`) with
-`[setup]`/`[persist]` lines flagged. The box proposes; only your laptop
-approves. An accepted change takes effect at the next `down` + `up`.
+stages it as an inert file, and you review a full diff on the laptop (or
+in a shell on the control plane itself) — `daybox profile proposals` →
+`accept <id>` / `reject <id>` — with `[setup]`/`[persist]` lines flagged.
+The box proposes; only you approve. An accepted change takes effect at the next `down` + `up`.
 `daybox up` offers a non-blocking review before each summon when proposals
 are pending.
 

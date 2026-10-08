@@ -20,6 +20,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -250,24 +251,50 @@ func isProfileHelp(tok string) bool {
 	return tok == "--help" || tok == "-h" || tok == "help"
 }
 
-// cmdProfile routes the `profile` group. The laptop-authority subverbs
+// isHelpFlag reports whether tok is a help FLAG (-h/--help). After a
+// subverb only the flag spellings mean help — a bare "help" there is a
+// positional like any other.
+func isHelpFlag(tok string) bool { return tok == "--help" || tok == "-h" }
+
+// wantsProfileHelp reports whether a `profile` invocation is a help request:
+// a help spelling as the subverb, or a help flag anywhere after it. The
+// second case is the `daybox profile add --help` bug — the flag used to
+// become the profile name, and add created (and billed) a volume for it.
+// propose is exempt: it parses its own flags and prints its own usage.
+func wantsProfileHelp(rest []string) bool {
+	if len(rest) == 0 {
+		return false
+	}
+	if isProfileHelp(rest[0]) {
+		return true
+	}
+	return rest[0] != "propose" && slices.ContainsFunc(rest[1:], isHelpFlag)
+}
+
+// cmdProfile routes the `profile` group. The seed-authority subverbs
 // (profilecmd.go, proposalcmd.go — edit/proposals/accept/reject/propose)
-// NEVER delegate — approval is a laptop-side action by design (§1e). The
-// box/volume lifecycle subverbs (add/ls/use/rename/rm/seed) run on the
-// plane when amPlane, else delegate.
+// never delegate: they run where the user is, against the seed store
+// (over ssh from the laptop, local files on the plane) — a box can only
+// propose (§1e). The box/volume lifecycle subverbs (add/ls/use/rename/rm/
+// seed) run on the plane when amPlane, else delegate. Help and argument
+// checks run before any of that, so both roles agree and a laptop refuses
+// a bad invocation before it reaches the plane (whatever binary it runs).
 func cmdProfile(p Parsed) {
 	rest := p.Rest()
-	// `daybox profile --help` (or -h/help): print the group usage, not the
-	// "unknown subverb" fatal the plane otherwise emits for --help. Checked
-	// before the laptop/plane split so both roles agree.
-	if len(rest) > 0 && isProfileHelp(rest[0]) {
+	// `daybox profile --help`, `profile <sub> --help` (or -h): print the
+	// group usage — never treat the flag as an argument.
+	if wantsProfileHelp(rest) {
 		profileUsage()
 		return
 	}
 	if len(rest) > 0 {
 		switch rest[0] {
 		case "edit":
-			cmdProfileEdit(rest[1:])
+			name, err := profileEditTarget(p.Global("profile"), rest[1:])
+			if err != nil {
+				log.Fatal(err)
+			}
+			cmdProfileEdit(name)
 			return
 		case "proposals":
 			cmdProfileProposals(rest[1:])
@@ -283,116 +310,204 @@ func cmdProfile(p Parsed) {
 			return
 		}
 	}
+	pc, err := parseProfileArgs(p)
+	if err != nil {
+		log.Fatal(err)
+	}
 	if amPlane() {
-		cmdProfilePlane(p)
+		runProfilePlane(loadDeployment(), pc)
 		return
 	}
 	delegate(p, false)
 }
 
-// cmdProfilePlane runs the box/volume lifecycle subverbs locally on the
-// plane (add/ls/use/rename/rm/seed). Unknown subverb -> usage. The profile
-// name comes from the hoisted -p global (or a positional fallback), the
-// same as the everyday verbs; the grammar lifts -p out before dispatch.
-func cmdProfilePlane(p Parsed) {
-	dep := loadDeployment()
+// profileCmd is a validated lifecycle invocation (add/ls/use/rename/rm/
+// seed), produced only by parseProfileArgs.
+type profileCmd struct {
+	sub   string // canonical subverb: add|ls|use|rename|rm|seed
+	name  string // the profile acted on; "" only for ls and a bare seed
+	arg   string // add: server type; rename: the new name; seed: show|init|path
+	purge bool   // rm --purge
+}
+
+// profileSubUsage is each lifecycle subverb's one-line usage, quoted in the
+// errors parseProfileArgs returns.
+var profileSubUsage = map[string]string{
+	"add":    "daybox profile add <name> [server-type]",
+	"ls":     "daybox profile ls",
+	"use":    "daybox profile use <name>",
+	"rename": "daybox profile rename <old> <new>",
+	"rm":     "daybox profile rm <name> [--purge]",
+	"seed":   "daybox profile seed [show|init|path] [<name>]",
+}
+
+// parseProfileArgs turns `profile <sub> ...` into a profileCmd, refusing
+// anything it can't read unambiguously. Role-independent (no I/O): the
+// laptop runs it before delegating and the plane before acting.
+//
+// The profile acted on comes from -p (hoisted by the grammar) OR the first
+// positional — never both, and never the current_profile/'default'
+// fallback the everyday verbs use: a destructive verb with no explicit
+// target, or with two candidate targets, is a usage error. Flag-shaped
+// tokens are never names: --purge is rm's one flag (any position), and any
+// other flag is an error — so a typo like --prge, or a --help that slipped
+// past wantsProfileHelp, can't become the profile acted on.
+func parseProfileArgs(p Parsed) (profileCmd, error) {
 	sub := "ls"
-	rest := []string{}
-	if r := p.Rest(); len(r) > 0 {
-		sub = r[0]
-		rest = r[1:]
+	toks := p.Rest()
+	if len(toks) > 0 {
+		sub, toks = toks[0], toks[1:]
 	}
-	name := p.Global("profile")
 	switch sub {
+	case "", "list":
+		sub = "ls"
+	case "mv":
+		sub = "rename"
+	case "remove":
+		sub = "rm"
+	}
+	usage, known := profileSubUsage[sub]
+	if !known {
+		return profileCmd{}, fmt.Errorf("unknown: profile %s  (add|ls|use|rename|rm|seed|edit|proposals|accept|reject|propose)", sub)
+	}
+	pc := profileCmd{sub: sub}
+	var pos []string
+	for _, t := range toks {
+		switch {
+		case sub == "rm" && t == "--purge":
+			pc.purge = true
+		case isFlagTok(t):
+			return profileCmd{}, fmt.Errorf("profile %s: unknown flag '%s'\nusage: %s", sub, t, usage)
+		default:
+			pos = append(pos, t)
+		}
+	}
+	flagName := p.Global("profile")
+	// target splits off the acted-on profile; tail is what remains for the
+	// subverb's own operands. maxTail bounds tail, so -p plus a positional
+	// name (or any stray extra) is refused rather than guessed at.
+	target := func(minTail, maxTail int) ([]string, error) {
+		tail := pos
+		if flagName != "" {
+			pc.name = flagName
+		} else if len(pos) > 0 {
+			pc.name, tail = pos[0], pos[1:]
+		}
+		if len(tail) > maxTail {
+			if flagName != "" {
+				return nil, fmt.Errorf("profile %s: unexpected '%s' — the profile is already -p %s\nusage: %s", sub, tail[maxTail], flagName, usage)
+			}
+			return nil, fmt.Errorf("profile %s: unexpected '%s'\nusage: %s", sub, tail[maxTail], usage)
+		}
+		if pc.name == "" || len(tail) < minTail {
+			return nil, fmt.Errorf("usage: %s", usage)
+		}
+		if !validProfileName(pc.name) {
+			return nil, fmt.Errorf("invalid profile '%s' (%s)", pc.name, profileNameRule)
+		}
+		return tail, nil
+	}
+	switch sub {
+	case "ls":
+		if len(pos) > 0 {
+			return profileCmd{}, fmt.Errorf("usage: %s", usage)
+		}
 	case "add":
-		// bash profile_add: name=${1:-} type=${2:-}. The name comes from -p
-		// when present; otherwise rest[0] is the name and rest[1] the type.
-		// (The grammar hoists -p into name, so rest is the positional tail.)
-		stype := ""
-		if name == "" {
-			if len(rest) > 0 {
-				name = rest[0]
-			}
-			if len(rest) > 1 {
-				stype = rest[1]
-			}
-		} else if len(rest) > 0 {
-			stype = rest[0]
+		tail, err := target(0, 1)
+		if err != nil {
+			return profileCmd{}, err
 		}
-		if name == "" {
-			log.Fatal("usage: daybox profile add <name> [server-type]")
+		if len(tail) == 1 {
+			pc.arg = tail[0]
 		}
-		if err := profileAdd(dep, name, stype); err != nil {
-			log.Fatal(err)
+	case "use", "rm":
+		if _, err := target(0, 0); err != nil {
+			return profileCmd{}, err
 		}
-	case "ls", "list", "":
-		profileLs(dep, os.Stdout)
-	case "use":
-		if name == "" && len(rest) > 0 {
-			name = rest[0]
+	case "rename":
+		tail, err := target(1, 1)
+		if err != nil {
+			return profileCmd{}, err
 		}
-		if name == "" {
-			log.Fatal("usage: daybox profile use <name>")
-		}
-		if err := profileUse(dep, name); err != nil {
-			log.Fatal(err)
-		}
-	case "rename", "mv":
-		// like add: <old> comes from -p when present; otherwise rest[0]
-		// is <old> and rest[1] is <new>. (The grammar hoists -p into name,
-		// so rest is the positional tail.)
-		new := ""
-		if name == "" {
-			if len(rest) > 0 {
-				name = rest[0]
-			}
-			if len(rest) > 1 {
-				new = rest[1]
-			}
-		} else if len(rest) > 0 {
-			new = rest[0]
-		}
-		if name == "" || new == "" {
-			log.Fatal("usage: daybox profile rename <old> <new>")
-		}
-		if err := profileRename(dep, name, new); err != nil {
-			log.Fatal(err)
-		}
-	case "rm", "remove":
-		// like add: name from -p or rest[0]; --purge is a trailing flag
-		// (the only option), so it is rest[1] when -p is absent, rest[0]
-		// when -p supplied the name.
-		purge := ""
-		if name == "" {
-			if len(rest) > 0 {
-				name = rest[0]
-			}
-			if len(rest) > 1 {
-				purge = rest[1]
-			}
-		} else if len(rest) > 0 {
-			purge = rest[0]
-		}
-		if name == "" {
-			log.Fatal("usage: daybox profile rm <name> [--purge]")
-		}
-		if err := profileRm(dep, name, purge); err != nil {
-			log.Fatal(err)
+		pc.arg = tail[0]
+		if !validProfileName(pc.arg) {
+			return profileCmd{}, fmt.Errorf("invalid profile '%s' (%s)", pc.arg, profileNameRule)
 		}
 	case "seed":
-		s := "show"
-		n := name
-		if len(rest) > 0 {
-			s = rest[0]
+		// seed [show|init|path] [<name>]: the name is the second positional
+		// or -p, not both; profileSeed defaults a missing one to 'default'.
+		pc.arg = "show"
+		if len(pos) > 0 {
+			pc.arg = pos[0]
 		}
-		if len(rest) > 1 {
-			n = rest[1]
+		pc.name = flagName
+		if len(pos) > 1 {
+			if flagName != "" {
+				return profileCmd{}, fmt.Errorf("profile seed: got -p %s AND '%s' — name one profile\nusage: %s", flagName, pos[1], usage)
+			}
+			pc.name = pos[1]
 		}
-		if err := profileSeed(dep, s, n, os.Stdout); err != nil {
-			log.Fatal(err)
+		if len(pos) > 2 {
+			return profileCmd{}, fmt.Errorf("usage: %s", usage)
 		}
-	default:
-		log.Fatalf("unknown: profile %s  (add|ls|use|rename|rm|seed)", sub)
+		if pc.name != "" && !validProfileName(pc.name) {
+			return profileCmd{}, fmt.Errorf("invalid profile '%s' (%s)", pc.name, profileNameRule)
+		}
+	}
+	return pc, nil
+}
+
+// profileEditTarget resolves `profile edit [name]`'s profile: -p or the
+// positional, not both; neither means the current profile (""), which is
+// fine for edit — it's validated and backed up, not destructive.
+func profileEditTarget(flagName string, toks []string) (string, error) {
+	const usage = "usage: daybox profile edit [name]"
+	var pos []string
+	for _, t := range toks {
+		if isFlagTok(t) {
+			return "", fmt.Errorf("profile edit: unknown flag '%s'\n%s", t, usage)
+		}
+		pos = append(pos, t)
+	}
+	switch {
+	case len(pos) > 1, len(pos) == 1 && flagName != "":
+		return "", fmt.Errorf("profile edit takes one profile name\n%s", usage)
+	case len(pos) == 1:
+		return pos[0], nil
+	}
+	return flagName, nil
+}
+
+// cmdProfilePlane runs a lifecycle subverb locally on the plane: the same
+// parse cmdProfile applies, then runProfilePlane.
+func cmdProfilePlane(p Parsed) {
+	pc, err := parseProfileArgs(p)
+	if err != nil {
+		log.Fatal(err)
+	}
+	runProfilePlane(loadDeployment(), pc)
+}
+
+// runProfilePlane executes a parsed lifecycle subverb (add/ls/use/rename/
+// rm/seed) on the plane.
+func runProfilePlane(dep *deployment, pc profileCmd) {
+	var err error
+	switch pc.sub {
+	case "add":
+		err = profileAdd(dep, pc.name, pc.arg)
+	case "ls":
+		profileLs(dep, os.Stdout)
+	case "use":
+		err = profileUse(dep, pc.name)
+	case "rename":
+		err = profileRename(dep, pc.name, pc.arg)
+	case "rm":
+		err = profileRm(dep, pc.name, pc.purge)
+	case "seed":
+		err = profileSeed(dep, pc.arg, pc.name, os.Stdout)
+	}
+	if err != nil {
+		log.Fatal(err)
 	}
 }
 

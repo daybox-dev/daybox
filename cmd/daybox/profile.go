@@ -93,15 +93,16 @@ var profileKnobs = []string{
 }
 
 // validProfileName lives in profilecmd.go (shared by the laptop profile verbs
-// + the plane-side deriveProfile). Lowercase letters, digits, dashes — the
-// name lands in a server name, a volume name, and on-disk paths.
+// + the plane-side deriveProfile). Lowercase letters, digits, dashes, never
+// dash-first — the name lands in a server name, a volume name, and on-disk
+// paths.
 
 // deriveProfile resolves a profile's knobs + paths from the deployment
 // baseline plus the profile's own overlay. Idempotent + leak-free: every
 // field is rebuilt from config sources, never inherited from a prior call.
 func (d *deployment) deriveProfile(name string) (*profile, error) {
 	if !validProfileName(name) {
-		return nil, fmt.Errorf("invalid profile '%s' (lowercase letters, digits, dashes)", name)
+		return nil, fmt.Errorf("invalid profile '%s' (%s)", name, profileNameRule)
 	}
 	// Load BOTH the deployment-wide config (config.local) AND the profile's
 	// own overlay fresh, each call — bash re-sourced them per derive_profile,
