@@ -49,7 +49,8 @@ everyday:
 
 setup:
   init             set up (or adopt) a control plane + enroll this device
-  upgrade          move the control plane to a newer release (no interview)
+  upgrade          move the control plane to a newer release (no interview;
+                   run it on the laptop, or on the plane to upgrade itself)
   enroll           (re-)enroll this device on your private net
 
 plumbing (used by machines more than people):

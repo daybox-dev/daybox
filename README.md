@@ -77,9 +77,12 @@ replaces `~/daybox` on the control plane (previous tree kept at
 same idempotent setup — no interview, and nothing that *is* your deployment
 (config, net, token, volumes, profiles) is touched. New boxes summon at the
 new version; a running box keeps the version it was summoned with until
-reaped (`daybox-agent version` on a box tells you which). The laptop binary
-doesn't self-update: re-run the installer, or `cmd/daybox/build.sh` +
-`install.sh` from a checkout.
+reaped (`daybox-agent version` on a box tells you which). Run it from the
+laptop and it first self-updates the laptop binary when the live release is
+ahead (dev builds and `--version` pins skip that). Run it on the control
+plane itself and the plane upgrades in place to the live release — no
+laptop needed; the plane's own binary arrives with the new tree, and it
+refuses to downgrade unless you pass `--version`.
 
 <details>
 <summary>Manual setup (what init automates)</summary>
